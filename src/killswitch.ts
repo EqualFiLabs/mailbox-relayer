@@ -3,6 +3,7 @@ import { ComputeAdapterRegistry } from './providers';
 import { ComputeProvider } from './providers/types';
 import { AdapterResultStatus } from './providers';
 import { KillSwitchRecord, MessageStore, TerminationAttemptRecord } from './store';
+import type { AlertingService } from './alerting';
 
 interface KillSwitchServiceOptions {
   baseBackoffMs?: number;
@@ -36,7 +37,8 @@ export class KillSwitchEnforcementService {
   constructor(
     private readonly store: MessageStore,
     private readonly providers: ComputeAdapterRegistry,
-    options: KillSwitchServiceOptions = {}
+    options: KillSwitchServiceOptions = {},
+    private readonly alerting?: AlertingService
   ) {
     this.baseBackoffMs = options.baseBackoffMs ?? 30_000;
     this.maxBackoffMs = options.maxBackoffMs ?? 15 * 60_000;
@@ -179,6 +181,14 @@ export class KillSwitchEnforcementService {
 
     this.store.addTerminationAttempt(record);
     this.updateKillSwitchTerminationStatus(input.agreementId, input.provider, status);
+
+    if (!terminated) {
+      if (!nextRetryAt) {
+        await this.alerting?.terminationExhausted(input.agreementId, input.provider, attemptNumber);
+      } else {
+        await this.alerting?.terminationFailure(input.agreementId, input.provider, message ?? 'unknown', attemptNumber);
+      }
+    }
 
     return record;
   }

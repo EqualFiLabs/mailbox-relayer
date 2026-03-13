@@ -5,6 +5,7 @@ import {
   UsageSettlementAttemptRecord,
   UsageSubmissionRecord,
 } from './store';
+import type { AlertingService } from './alerting';
 
 export interface UsageSettlementSenderResult {
   status: AdapterResultStatus;
@@ -106,7 +107,8 @@ export class UsageSettlementService {
   constructor(
     private readonly store: MessageStore,
     private readonly sender: UsageSettlementSender,
-    options: UsageSettlementServiceOptions = {}
+    options: UsageSettlementServiceOptions = {},
+    private readonly alerting?: AlertingService
   ) {
     this.now = options.now ?? (() => new Date().toISOString());
     this.baseBackoffMs = options.baseBackoffMs ?? 30_000;
@@ -171,6 +173,14 @@ export class UsageSettlementService {
     };
 
     this.store.addUsageSettlementAttempt(attempt);
+
+    if (!settled) {
+      if (!nextRetryAt) {
+        await this.alerting?.settlementExhausted(submission.id, submission.agreementId, attemptNumber);
+      } else {
+        await this.alerting?.settlementFailure(submission.id, submission.agreementId, send.message ?? 'unknown', attemptNumber);
+      }
+    }
 
     return attempt;
   }
