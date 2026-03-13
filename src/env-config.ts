@@ -39,6 +39,14 @@ export const phase2EnvSchema = z
     LOW_BALANCE_THRESHOLD_ETH: numericFromEnv(z.number().positive(), 0.01),
 
     PROVIDER_EVENT_AUTH_TOKEN: z.string().min(1).optional(),
+    IDENTITY_MODE: z.enum(['none', 'erc8004_offchain']).default('none'),
+    ERC8004_RPC_URL: z.string().url().optional(),
+    ERC8004_CHAIN_ID: numericFromEnv(z.number().int().positive()).optional(),
+    ERC8004_REGISTRY_ADDRESS: z
+      .string()
+      .regex(/^0x[a-fA-F0-9]{40}$/, 'must be a 20-byte hex address with 0x prefix')
+      .optional(),
+    IDENTITY_PROOF_MAX_SKEW_SECONDS: numericFromEnv(z.number().int().nonnegative(), 60),
   })
   .superRefine((value, ctx) => {
     if (
@@ -50,6 +58,32 @@ export const phase2EnvSchema = z
         path: ['RELAYER_ENCRYPTION_PRIVATE_KEY'],
         message: 'RELAYER_PRIVATE_KEY and RELAYER_ENCRYPTION_PRIVATE_KEY must be different',
       });
+    }
+
+    if (value.IDENTITY_MODE === 'erc8004_offchain') {
+      if (!value.ERC8004_RPC_URL) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['ERC8004_RPC_URL'],
+          message: 'ERC8004_RPC_URL is required when IDENTITY_MODE=erc8004_offchain',
+        });
+      }
+
+      if (!value.ERC8004_CHAIN_ID) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['ERC8004_CHAIN_ID'],
+          message: 'ERC8004_CHAIN_ID is required when IDENTITY_MODE=erc8004_offchain',
+        });
+      }
+
+      if (!value.ERC8004_REGISTRY_ADDRESS) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['ERC8004_REGISTRY_ADDRESS'],
+          message: 'ERC8004_REGISTRY_ADDRESS is required when IDENTITY_MODE=erc8004_offchain',
+        });
+      }
     }
   });
 

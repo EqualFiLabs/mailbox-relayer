@@ -6,6 +6,7 @@ import { StoredMessage } from './types';
 import { ComputeAdapterRegistry, ComputeProvider } from './providers';
 import { DeterministicMeteringWorker } from './metering';
 import { KillSwitchEnforcementService } from './killswitch';
+import { verifyIdentityProof } from './identity-resolver';
 
 export type OnchainEvent = z.infer<typeof onchainEventSchema>;
 
@@ -21,12 +22,24 @@ export interface OnchainIngestionResult {
   meta?: Record<string, unknown>;
 }
 
+export interface IdentityGateConfig {
+  mode: 'none' | 'erc8004_offchain';
+  targetChainId?: number;
+  diamondAddress?: string;
+  erc8004ChainId?: number;
+  erc8004RpcUrl?: string;
+  erc8004RegistryAddress?: string;
+  proofMaxSkewSeconds?: number;
+  resolveWallet?: (agentRegistry: string, agentId: string) => Promise<string>;
+}
+
 export class OnchainEventIngestionWorker {
   constructor(
     private readonly store: MessageStore,
     private readonly providers: ComputeAdapterRegistry,
     private readonly meteringWorker?: DeterministicMeteringWorker,
-    private readonly killSwitchService?: KillSwitchEnforcementService
+    private readonly killSwitchService?: KillSwitchEnforcementService,
+    private readonly identityGate: IdentityGateConfig = { mode: 'none' }
   ) {}
 
   async ingest(event: OnchainEvent): Promise<OnchainIngestionResult> {
@@ -138,6 +151,24 @@ export class OnchainEventIngestionWorker {
         agreementId: event.agreementId,
         action: 'rejected',
         message: 'activation event missing canonical provider',
+      };
+    }
+
+    const identityCheck = await this.verifyActivationIdentity(event);
+    if (!identityCheck.ok) {
+      this.store.setAgreementState(this.toStateRecord(event.agreementId, 'activation_failed', event.traceId));
+      return {
+        accepted: false,
+        deduped: false,
+        eventKey,
+        eventType: event.eventType,
+        agreementId: event.agreementId,
+        provider,
+        action: 'rejected',
+        message: 'identity_verification_failed',
+        meta: {
+          reason: identityCheck.reason,
+        },
       };
     }
 
@@ -424,5 +455,49 @@ export class OnchainEventIngestionWorker {
 
   private isComputeProvider(value: unknown): value is ComputeProvider {
     return value === 'lambda' || value === 'runpod' || value === 'venice' || value === 'bankr';
+  }
+
+  private async verifyActivationIdentity(
+    event: OnchainEvent
+  ): Promise<{ ok: true } | { ok: false; reason: string }> {
+    if (this.identityGate.mode !== 'erc8004_offchain') {
+      return { ok: true };
+    }
+
+    if (!this.identityGate.diamondAddress) {
+      return { ok: false, reason: 'identity_gate_diamond_not_configured' };
+    }
+
+    const payload = event.payload;
+    if (!payload || typeof payload !== 'object') {
+      return { ok: false, reason: 'missing_identity_proof' };
+    }
+
+    const identity = (payload as Record<string, unknown>).identity;
+    if (!identity || typeof identity !== 'object') {
+      return { ok: false, reason: 'missing_identity_proof' };
+    }
+
+    const verification = await verifyIdentityProof(identity as Record<string, unknown>, {
+      agreementId: event.agreementId,
+      targetChainId: this.identityGate.targetChainId ?? event.chainId,
+      diamondAddress: this.identityGate.diamondAddress,
+      ...(this.identityGate.erc8004ChainId !== undefined
+        ? { erc8004ChainId: this.identityGate.erc8004ChainId }
+        : {}),
+      ...(this.identityGate.erc8004RpcUrl ? { erc8004RpcUrl: this.identityGate.erc8004RpcUrl } : {}),
+      ...(this.identityGate.erc8004RegistryAddress
+        ? { erc8004RegistryAddress: this.identityGate.erc8004RegistryAddress }
+        : {}),
+      ...(this.identityGate.proofMaxSkewSeconds !== undefined
+        ? { maxSkewSeconds: this.identityGate.proofMaxSkewSeconds }
+        : {}),
+      ...(this.identityGate.resolveWallet ? { resolveWallet: this.identityGate.resolveWallet } : {}),
+    });
+
+    if (!verification.ok) {
+      return { ok: false, reason: verification.reason ?? 'identity_verification_failed' };
+    }
+    return { ok: true };
   }
 }

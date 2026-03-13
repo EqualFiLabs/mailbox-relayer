@@ -20,6 +20,8 @@ describe('phase2 env config', () => {
     expect(parsed.GAS_LIMIT_MULTIPLIER).toBe(1.2);
     expect(parsed.MAX_GAS_PRICE_GWEI).toBe(100);
     expect(parsed.LOW_BALANCE_THRESHOLD_ETH).toBe(0.01);
+    expect(parsed.IDENTITY_MODE).toBe('none');
+    expect(parsed.IDENTITY_PROOF_MAX_SKEW_SECONDS).toBe(60);
   });
 
   it('accepts explicit optional values', () => {
@@ -60,5 +62,31 @@ describe('phase2 env config', () => {
         RELAYER_ENCRYPTION_PRIVATE_KEY: baseEnv.RELAYER_PRIVATE_KEY,
       })
     ).toThrow('must be different');
+  });
+
+  it('requires ERC-8004 resolver env vars when IDENTITY_MODE=erc8004_offchain', () => {
+    expect(() =>
+      validatePhase2Env({
+        ...baseEnv,
+        IDENTITY_MODE: 'erc8004_offchain',
+      })
+    ).toThrow('ERC8004_RPC_URL is required');
+  });
+
+  it('accepts resolver env vars when IDENTITY_MODE=erc8004_offchain', () => {
+    const parsed = validatePhase2Env({
+      ...baseEnv,
+      IDENTITY_MODE: 'erc8004_offchain',
+      ERC8004_RPC_URL: 'https://base-rpc.example',
+      ERC8004_CHAIN_ID: '84532',
+      ERC8004_REGISTRY_ADDRESS: '0x2222222222222222222222222222222222222222',
+      IDENTITY_PROOF_MAX_SKEW_SECONDS: '120',
+    });
+
+    expect(parsed.IDENTITY_MODE).toBe('erc8004_offchain');
+    expect(parsed.ERC8004_RPC_URL).toBe('https://base-rpc.example');
+    expect(parsed.ERC8004_CHAIN_ID).toBe(84532);
+    expect(parsed.ERC8004_REGISTRY_ADDRESS).toBe('0x2222222222222222222222222222222222222222');
+    expect(parsed.IDENTITY_PROOF_MAX_SKEW_SECONDS).toBe(120);
   });
 });

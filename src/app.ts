@@ -11,7 +11,7 @@ import {
 import { createDefaultStore, MessageStore } from './store';
 import { StoredMessage } from './types';
 import { ComputeAdapterRegistry, createDefaultComputeAdapterRegistry } from './providers';
-import { OnchainEventIngestionWorker } from './events';
+import { IdentityGateConfig, OnchainEventIngestionWorker } from './events';
 import { DeterministicMeteringWorker, MeteringScheduler } from './metering';
 import { KillSwitchEnforcementService, KillSwitchRetryScheduler } from './killswitch';
 import {
@@ -22,6 +22,31 @@ import {
 
 interface BuildAppOptions {
   adminAuthToken?: string;
+  identityGate?: IdentityGateConfig;
+}
+
+function envNumber(value: string | undefined): number | undefined {
+  if (!value) return undefined;
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return undefined;
+  return parsed;
+}
+
+function envIdentityGate(): IdentityGateConfig {
+  const mode = process.env.IDENTITY_MODE === 'erc8004_offchain' ? 'erc8004_offchain' : 'none';
+  return {
+    mode,
+    ...(envNumber(process.env.CHAIN_ID) !== undefined ? { targetChainId: envNumber(process.env.CHAIN_ID) } : {}),
+    ...(process.env.DIAMOND_ADDRESS ? { diamondAddress: process.env.DIAMOND_ADDRESS } : {}),
+    ...(envNumber(process.env.ERC8004_CHAIN_ID) !== undefined
+      ? { erc8004ChainId: envNumber(process.env.ERC8004_CHAIN_ID) }
+      : {}),
+    ...(process.env.ERC8004_RPC_URL ? { erc8004RpcUrl: process.env.ERC8004_RPC_URL } : {}),
+    ...(process.env.ERC8004_REGISTRY_ADDRESS ? { erc8004RegistryAddress: process.env.ERC8004_REGISTRY_ADDRESS } : {}),
+    ...(envNumber(process.env.IDENTITY_PROOF_MAX_SKEW_SECONDS) !== undefined
+      ? { proofMaxSkewSeconds: envNumber(process.env.IDENTITY_PROOF_MAX_SKEW_SECONDS) }
+      : {}),
+  };
 }
 
 export function buildApp(
@@ -78,7 +103,13 @@ export function buildApp(
     }
   });
 
-  const onchainWorker = new OnchainEventIngestionWorker(store, providerRegistry, meteringWorker, killSwitchService);
+  const onchainWorker = new OnchainEventIngestionWorker(
+    store,
+    providerRegistry,
+    meteringWorker,
+    killSwitchService,
+    options.identityGate ?? envIdentityGate()
+  );
 
   app.get('/health', async () => ({ ok: true }));
 
