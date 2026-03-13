@@ -218,9 +218,10 @@ export class UsageSettlementScheduler {
     return true;
   }
 
-  status(): { enabled: boolean; intervalMs: number } {
+  status(): { enabled: boolean; running: boolean; intervalMs: number } {
     return {
       enabled: Boolean(this.timer),
+      running: this.isRunning,
       intervalMs: this.intervalMs,
     };
   }
