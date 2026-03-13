@@ -49,6 +49,20 @@ export interface UsageSubmissionRecord {
   from?: string;
 }
 
+export interface UsageSettlementAttemptRecord {
+  id: string;
+  submissionId: string;
+  agreementId: string;
+  provider: ComputeProvider;
+  attempt: number;
+  status: AdapterResultStatus;
+  settled: boolean;
+  at: string;
+  txHash?: string;
+  message?: string;
+  nextRetryAt?: string;
+}
+
 export interface KillSwitchRecord {
   agreementId: string;
   active: boolean;
@@ -88,7 +102,14 @@ export interface MessageStore {
   getUsageCheckpoint(agreementId: string): UsageCheckpoint | undefined;
 
   addUsageSubmission(record: UsageSubmissionRecord): void;
+  getUsageSubmission(id: string): UsageSubmissionRecord | undefined;
   listUsageSubmissions(limit?: number): UsageSubmissionRecord[];
+  listUnattemptedUsageSubmissions(limit?: number): UsageSubmissionRecord[];
+
+  addUsageSettlementAttempt(record: UsageSettlementAttemptRecord): void;
+  getLatestUsageSettlementAttempt(submissionId: string): UsageSettlementAttemptRecord | undefined;
+  listUsageSettlementAttempts(submissionId?: string, limit?: number): UsageSettlementAttemptRecord[];
+  listDueUsageSettlementRetries(nowIso: string, limit?: number): UsageSettlementAttemptRecord[];
 
   setAgreementState(record: AgreementStateRecord): void;
   getAgreementState(agreementId: string): AgreementStateRecord | undefined;
@@ -110,6 +131,7 @@ export class InMemoryMessageStore implements MessageStore {
   private readonly providerLinks = new Map<string, ProviderResourceLink>();
   private readonly usageCheckpoints = new Map<string, UsageCheckpoint>();
   private readonly usageSubmissions: UsageSubmissionRecord[] = [];
+  private readonly usageSettlementAttempts: UsageSettlementAttemptRecord[] = [];
   private readonly agreementStates = new Map<string, AgreementStateRecord>();
   private readonly killSwitches = new Map<string, KillSwitchRecord>();
   private readonly terminationAttempts: TerminationAttemptRecord[] = [];
@@ -156,8 +178,66 @@ export class InMemoryMessageStore implements MessageStore {
     this.usageSubmissions.push(record);
   }
 
+  getUsageSubmission(id: string): UsageSubmissionRecord | undefined {
+    return this.usageSubmissions.find((s) => s.id === id);
+  }
+
   listUsageSubmissions(limit = 50): UsageSubmissionRecord[] {
     return this.usageSubmissions.slice(-limit).reverse();
+  }
+
+  listUnattemptedUsageSubmissions(limit = 20): UsageSubmissionRecord[] {
+    const attempted = new Set(this.usageSettlementAttempts.map((a) => a.submissionId));
+    return this.usageSubmissions.filter((s) => !attempted.has(s.id)).slice(0, limit);
+  }
+
+  addUsageSettlementAttempt(record: UsageSettlementAttemptRecord): void {
+    this.usageSettlementAttempts.push(record);
+  }
+
+  getLatestUsageSettlementAttempt(submissionId: string): UsageSettlementAttemptRecord | undefined {
+    return this.usageSettlementAttempts
+      .filter((r) => r.submissionId === submissionId)
+      .sort((a, b) => {
+        if (a.at === b.at) return b.attempt - a.attempt;
+        return b.at.localeCompare(a.at);
+      })[0];
+  }
+
+  listUsageSettlementAttempts(submissionId?: string, limit = 50): UsageSettlementAttemptRecord[] {
+    const filtered = submissionId
+      ? this.usageSettlementAttempts.filter((r) => r.submissionId === submissionId)
+      : this.usageSettlementAttempts;
+
+    return [...filtered]
+      .sort((a, b) => {
+        if (a.at === b.at) return b.attempt - a.attempt;
+        return b.at.localeCompare(a.at);
+      })
+      .slice(0, limit);
+  }
+
+  listDueUsageSettlementRetries(nowIso: string, limit = 20): UsageSettlementAttemptRecord[] {
+    const now = Date.parse(nowIso);
+    if (Number.isNaN(now)) return [];
+
+    const latestBySubmission = new Map<string, UsageSettlementAttemptRecord>();
+
+    for (const attempt of this.usageSettlementAttempts) {
+      const existing = latestBySubmission.get(attempt.submissionId);
+      if (!existing || attempt.at > existing.at || (attempt.at === existing.at && attempt.attempt > existing.attempt)) {
+        latestBySubmission.set(attempt.submissionId, attempt);
+      }
+    }
+
+    return [...latestBySubmission.values()]
+      .filter((attempt) => {
+        if (attempt.settled) return false;
+        if (!attempt.nextRetryAt) return false;
+        return Date.parse(attempt.nextRetryAt) <= now;
+      })
+      .sort((a, b) => (a.nextRetryAt ?? '').localeCompare(b.nextRetryAt ?? ''))
+      .slice(0, limit);
   }
 
   setAgreementState(record: AgreementStateRecord): void {
@@ -276,6 +356,20 @@ export class SQLiteMessageStore implements MessageStore {
         items_json TEXT NOT NULL,
         final_pass INTEGER NOT NULL,
         created_at TEXT NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS usage_settlement_attempts (
+        id TEXT PRIMARY KEY,
+        submission_id TEXT NOT NULL,
+        agreement_id TEXT NOT NULL,
+        provider TEXT NOT NULL,
+        attempt INTEGER NOT NULL,
+        status TEXT NOT NULL,
+        settled INTEGER NOT NULL,
+        tx_hash TEXT,
+        message TEXT,
+        next_retry_at TEXT,
+        at TEXT NOT NULL
       );
 
       CREATE TABLE IF NOT EXISTS agreement_states (
@@ -501,6 +595,29 @@ export class SQLiteMessageStore implements MessageStore {
       );
   }
 
+  getUsageSubmission(id: string): UsageSubmissionRecord | undefined {
+    const row = this.db
+      .prepare(
+        `SELECT id, agreement_id, provider, from_ts, to_ts, usage_digest, items_json, final_pass, created_at
+         FROM usage_submissions WHERE id = ?`
+      )
+      .get(id) as
+      | {
+          id: string;
+          agreement_id: string;
+          provider: ComputeProvider;
+          from_ts: string | null;
+          to_ts: string;
+          usage_digest: string;
+          items_json: string;
+          final_pass: number;
+          created_at: string;
+        }
+      | undefined;
+
+    return row ? rowToUsageSubmission(row) : undefined;
+  }
+
   listUsageSubmissions(limit = 50): UsageSubmissionRecord[] {
     const rows = this.db
       .prepare(
@@ -521,17 +638,162 @@ export class SQLiteMessageStore implements MessageStore {
       created_at: string;
     }>;
 
-    return rows.map((row) => ({
-      id: row.id,
-      agreementId: row.agreement_id,
-      provider: row.provider,
-      ...(row.from_ts ? { from: row.from_ts } : {}),
-      to: row.to_ts,
-      usageDigest: row.usage_digest,
-      items: JSON.parse(row.items_json),
-      finalPass: Boolean(row.final_pass),
-      createdAt: row.created_at,
-    }));
+    return rows.map(rowToUsageSubmission);
+  }
+
+  listUnattemptedUsageSubmissions(limit = 20): UsageSubmissionRecord[] {
+    const rows = this.db
+      .prepare(
+        `SELECT s.id, s.agreement_id, s.provider, s.from_ts, s.to_ts, s.usage_digest, s.items_json, s.final_pass, s.created_at
+         FROM usage_submissions s
+         LEFT JOIN usage_settlement_attempts a ON a.submission_id = s.id
+         WHERE a.submission_id IS NULL
+         ORDER BY s.created_at ASC
+         LIMIT ?`
+      )
+      .all(limit) as Array<{
+      id: string;
+      agreement_id: string;
+      provider: ComputeProvider;
+      from_ts: string | null;
+      to_ts: string;
+      usage_digest: string;
+      items_json: string;
+      final_pass: number;
+      created_at: string;
+    }>;
+
+    return rows.map(rowToUsageSubmission);
+  }
+
+  addUsageSettlementAttempt(record: UsageSettlementAttemptRecord): void {
+    this.db
+      .prepare(
+        `INSERT INTO usage_settlement_attempts
+         (id, submission_id, agreement_id, provider, attempt, status, settled, tx_hash, message, next_retry_at, at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      )
+      .run(
+        record.id,
+        record.submissionId,
+        record.agreementId,
+        record.provider,
+        record.attempt,
+        record.status,
+        record.settled ? 1 : 0,
+        record.txHash ?? null,
+        record.message ?? null,
+        record.nextRetryAt ?? null,
+        record.at
+      );
+  }
+
+  getLatestUsageSettlementAttempt(submissionId: string): UsageSettlementAttemptRecord | undefined {
+    const row = this.db
+      .prepare(
+        `SELECT id, submission_id, agreement_id, provider, attempt, status, settled, tx_hash, message, next_retry_at, at
+         FROM usage_settlement_attempts
+         WHERE submission_id = ?
+         ORDER BY at DESC, attempt DESC
+         LIMIT 1`
+      )
+      .get(submissionId) as
+      | {
+          id: string;
+          submission_id: string;
+          agreement_id: string;
+          provider: ComputeProvider;
+          attempt: number;
+          status: AdapterResultStatus;
+          settled: number;
+          tx_hash: string | null;
+          message: string | null;
+          next_retry_at: string | null;
+          at: string;
+        }
+      | undefined;
+
+    return row ? rowToUsageSettlementAttempt(row) : undefined;
+  }
+
+  listUsageSettlementAttempts(submissionId?: string, limit = 50): UsageSettlementAttemptRecord[] {
+    const rows = submissionId
+      ? (this.db
+          .prepare(
+            `SELECT id, submission_id, agreement_id, provider, attempt, status, settled, tx_hash, message, next_retry_at, at
+             FROM usage_settlement_attempts
+             WHERE submission_id = ?
+             ORDER BY at DESC, attempt DESC
+             LIMIT ?`
+          )
+          .all(submissionId, limit) as Array<{
+          id: string;
+          submission_id: string;
+          agreement_id: string;
+          provider: ComputeProvider;
+          attempt: number;
+          status: AdapterResultStatus;
+          settled: number;
+          tx_hash: string | null;
+          message: string | null;
+          next_retry_at: string | null;
+          at: string;
+        }>)
+      : (this.db
+          .prepare(
+            `SELECT id, submission_id, agreement_id, provider, attempt, status, settled, tx_hash, message, next_retry_at, at
+             FROM usage_settlement_attempts
+             ORDER BY at DESC, attempt DESC
+             LIMIT ?`
+          )
+          .all(limit) as Array<{
+          id: string;
+          submission_id: string;
+          agreement_id: string;
+          provider: ComputeProvider;
+          attempt: number;
+          status: AdapterResultStatus;
+          settled: number;
+          tx_hash: string | null;
+          message: string | null;
+          next_retry_at: string | null;
+          at: string;
+        }>);
+
+    return rows.map(rowToUsageSettlementAttempt);
+  }
+
+  listDueUsageSettlementRetries(nowIso: string, limit = 20): UsageSettlementAttemptRecord[] {
+    const rows = this.db
+      .prepare(
+        `SELECT a.id, a.submission_id, a.agreement_id, a.provider, a.attempt, a.status, a.settled, a.tx_hash, a.message, a.next_retry_at, a.at
+         FROM usage_settlement_attempts a
+         INNER JOIN (
+           SELECT submission_id, MAX(attempt) AS max_attempt
+           FROM usage_settlement_attempts
+           GROUP BY submission_id
+         ) latest ON latest.submission_id = a.submission_id AND latest.max_attempt = a.attempt
+         WHERE a.settled = 0
+           AND a.next_retry_at IS NOT NULL
+           AND a.next_retry_at <= ?
+         ORDER BY a.next_retry_at ASC
+         LIMIT ?`
+      )
+      .all(nowIso, limit) as Array<{
+      id: string;
+      submission_id: string;
+      agreement_id: string;
+      provider: ComputeProvider;
+      attempt: number;
+      status: AdapterResultStatus;
+      settled: number;
+      tx_hash: string | null;
+      message: string | null;
+      next_retry_at: string | null;
+      at: string;
+    }>;
+
+    return rows.map(rowToUsageSettlementAttempt);
   }
 
   setAgreementState(record: AgreementStateRecord): void {
@@ -814,6 +1076,58 @@ export class SQLiteMessageStore implements MessageStore {
       return false;
     }
   }
+}
+
+function rowToUsageSubmission(row: {
+  id: string;
+  agreement_id: string;
+  provider: ComputeProvider;
+  from_ts: string | null;
+  to_ts: string;
+  usage_digest: string;
+  items_json: string;
+  final_pass: number;
+  created_at: string;
+}): UsageSubmissionRecord {
+  return {
+    id: row.id,
+    agreementId: row.agreement_id,
+    provider: row.provider,
+    ...(row.from_ts ? { from: row.from_ts } : {}),
+    to: row.to_ts,
+    usageDigest: row.usage_digest,
+    items: JSON.parse(row.items_json),
+    finalPass: Boolean(row.final_pass),
+    createdAt: row.created_at,
+  };
+}
+
+function rowToUsageSettlementAttempt(row: {
+  id: string;
+  submission_id: string;
+  agreement_id: string;
+  provider: ComputeProvider;
+  attempt: number;
+  status: AdapterResultStatus;
+  settled: number;
+  tx_hash: string | null;
+  message: string | null;
+  next_retry_at: string | null;
+  at: string;
+}): UsageSettlementAttemptRecord {
+  return {
+    id: row.id,
+    submissionId: row.submission_id,
+    agreementId: row.agreement_id,
+    provider: row.provider,
+    attempt: row.attempt,
+    status: row.status,
+    settled: Boolean(row.settled),
+    ...(row.tx_hash ? { txHash: row.tx_hash } : {}),
+    ...(row.message ? { message: row.message } : {}),
+    ...(row.next_retry_at ? { nextRetryAt: row.next_retry_at } : {}),
+    at: row.at,
+  };
 }
 
 function rowToTerminationAttempt(row: {

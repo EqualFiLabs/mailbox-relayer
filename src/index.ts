@@ -3,14 +3,20 @@ import { createDefaultStore } from './store';
 import { createDefaultComputeAdapterRegistry } from './providers';
 import { DeterministicMeteringWorker, MeteringScheduler } from './metering';
 import { KillSwitchEnforcementService, KillSwitchRetryScheduler } from './killswitch';
+import {
+  DisabledUsageSettlementSender,
+  UsageSettlementScheduler,
+  UsageSettlementService,
+  WebhookUsageSettlementSender,
+} from './settlement';
 
 const store = createDefaultStore();
 const providerRegistry = createDefaultComputeAdapterRegistry();
 
 const meteringWorker = new DeterministicMeteringWorker(store, providerRegistry);
-const intervalMs = Number(process.env.METERING_INTERVAL_MS ?? '30000');
+const meteringIntervalMs = Number(process.env.METERING_INTERVAL_MS ?? '30000');
 const meteringEnabled = process.env.METERING_ENABLED === 'true';
-const meteringScheduler = new MeteringScheduler(meteringWorker, intervalMs);
+const meteringScheduler = new MeteringScheduler(meteringWorker, meteringIntervalMs);
 if (meteringEnabled) {
   meteringScheduler.start();
 }
@@ -23,18 +29,36 @@ if (killSwitchRetryEnabled) {
   killSwitchRetryScheduler.start();
 }
 
+const settlementSender = process.env.USAGE_SETTLEMENT_WEBHOOK_URL
+  ? new WebhookUsageSettlementSender(
+      process.env.USAGE_SETTLEMENT_WEBHOOK_URL,
+      process.env.USAGE_SETTLEMENT_WEBHOOK_TOKEN
+    )
+  : new DisabledUsageSettlementSender();
+
+const usageSettlementService = new UsageSettlementService(store, settlementSender);
+const usageSettlementIntervalMs = Number(process.env.USAGE_SETTLEMENT_INTERVAL_MS ?? '30000');
+const usageSettlementEnabled = process.env.USAGE_SETTLEMENT_ENABLED === 'true';
+const usageSettlementScheduler = new UsageSettlementScheduler(usageSettlementService, usageSettlementIntervalMs);
+if (usageSettlementEnabled) {
+  usageSettlementScheduler.start();
+}
+
 const app = buildApp(
   store,
   providerRegistry,
   meteringWorker,
   meteringScheduler,
   killSwitchService,
-  killSwitchRetryScheduler
+  killSwitchRetryScheduler,
+  usageSettlementService,
+  usageSettlementScheduler
 );
 
 app.addHook('onClose', async () => {
   meteringScheduler.stop();
   killSwitchRetryScheduler.stop();
+  usageSettlementScheduler.stop();
 });
 
 const port = Number(process.env.PORT ?? '3000');

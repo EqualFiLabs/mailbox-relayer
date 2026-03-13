@@ -12,8 +12,10 @@ Offchain mailbox relayer service for EqualFi.
 - `POST /events/onchain` - ingest on-chain lifecycle events (single event or batch)
 - `GET /agreements/:agreementId/state` - inspect relayer agreement state machine view
 - `POST /metering/run` - execute deterministic metering poll once (all agreements or one)
-- `GET /metering/submissions` - inspect prepared batched registerUsage submissions
-- `GET /metering/status` - metering + kill-switch retry scheduler status
+- `GET /metering/submissions` - inspect prepared batched registerUsage submissions + latest settlement status
+- `POST /settlement/run` - process usage settlement queue (new + due retries)
+- `GET /settlement/attempts` - inspect settlement attempt history
+- `GET /metering/status` - metering + kill-switch retry + settlement scheduler status
 - `GET /agreements/:agreementId/draw-eligibility` - check whether draw path is frozen
 - `POST /killswitch/retries/run` - process due termination retries (with backoff)
 - `GET /killswitch/active` - list active kill-switches
@@ -66,12 +68,17 @@ Environment variables:
 - `METERING_INTERVAL_MS` (default `30000`)
 - `KILLSWITCH_RETRY_ENABLED` (`true`/`false`, default `false`)
 - `KILLSWITCH_RETRY_INTERVAL_MS` (default `30000`)
+- `USAGE_SETTLEMENT_ENABLED` (`true`/`false`, default `false`)
+- `USAGE_SETTLEMENT_INTERVAL_MS` (default `30000`)
+- `USAGE_SETTLEMENT_WEBHOOK_URL` (optional; external signer/settlement worker endpoint)
+- `USAGE_SETTLEMENT_WEBHOOK_TOKEN` (optional; bearer token for settlement webhook)
 
 Durable SQLite state includes:
 - mailbox messages
 - provider resource links (`agreementId -> providerResourceId`)
 - usage checkpoints
 - prepared usage submission batches (`registerUsage` payload staging)
+- usage settlement attempts + retry metadata
 - active kill-switch state
 - termination attempt history + retry metadata (backoff scheduling)
 - processed event keys (idempotency)
