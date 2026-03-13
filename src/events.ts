@@ -126,7 +126,8 @@ export class OnchainEventIngestionWorker {
   }
 
   private async handleActivationEvent(event: OnchainEvent, eventKey: string): Promise<OnchainIngestionResult> {
-    const provider = event.provider ?? this.store.getProviderLink(event.agreementId)?.provider;
+    // Canonical routing source for activation is on-chain provider from the event payload.
+    const provider = event.provider;
 
     if (!provider) {
       return {
@@ -136,7 +137,45 @@ export class OnchainEventIngestionWorker {
         eventType: event.eventType,
         agreementId: event.agreementId,
         action: 'rejected',
-        message: 'activation event missing provider',
+        message: 'activation event missing canonical provider',
+      };
+    }
+
+    const overrideAttempt = this.readProviderOverride(event.policy, event.payload);
+    if (overrideAttempt && overrideAttempt !== provider) {
+      this.store.setAgreementState(this.toStateRecord(event.agreementId, 'activation_failed', event.traceId));
+      return {
+        accepted: true,
+        deduped: false,
+        eventKey,
+        eventType: event.eventType,
+        agreementId: event.agreementId,
+        provider,
+        action: 'activation_rejected_provider_mismatch',
+        message: 'provider_override_mismatch',
+        meta: {
+          canonicalProvider: provider,
+          overrideProvider: overrideAttempt,
+        },
+      };
+    }
+
+    const existingLink = this.store.getProviderLink(event.agreementId);
+    if (existingLink && existingLink.provider !== provider) {
+      this.store.setAgreementState(this.toStateRecord(event.agreementId, 'activation_failed', event.traceId));
+      return {
+        accepted: true,
+        deduped: false,
+        eventKey,
+        eventType: event.eventType,
+        agreementId: event.agreementId,
+        provider,
+        action: 'activation_rejected_provider_mismatch',
+        message: 'provider_override_mismatch',
+        meta: {
+          canonicalProvider: provider,
+          existingProvider: existingLink.provider,
+        },
       };
     }
 
@@ -353,5 +392,37 @@ export class OnchainEventIngestionWorker {
           link.providerResourceId === providerResourceId &&
           link.agreementId !== agreementId
       );
+  }
+
+  private readProviderOverride(
+    policy?: Record<string, unknown>,
+    payload?: Record<string, unknown>
+  ): ComputeProvider | undefined {
+    const candidates = [
+      this.readProviderFromRecord(payload),
+      this.readProviderFromRecord(policy),
+    ];
+
+    for (const candidate of candidates) {
+      if (candidate) return candidate;
+    }
+
+    return undefined;
+  }
+
+  private readProviderFromRecord(record?: Record<string, unknown>): ComputeProvider | undefined {
+    if (!record) return undefined;
+    const keys = ['provider', 'computeProvider'];
+    for (const key of keys) {
+      const value = record[key];
+      if (this.isComputeProvider(value)) {
+        return value;
+      }
+    }
+    return undefined;
+  }
+
+  private isComputeProvider(value: unknown): value is ComputeProvider {
+    return value === 'lambda' || value === 'runpod' || value === 'venice' || value === 'bankr';
   }
 }
