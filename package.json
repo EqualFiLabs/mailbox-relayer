@@ -1,6 +1,6 @@
 {
   "name": "mailbox-relayer",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "description": "Offchain mailbox relayer service for EqualFi",
   "license": "MIT",
@@ -11,16 +11,17 @@
     "dev": "tsx watch src/index.ts",
     "build": "tsup src/index.ts --format cjs,esm --dts",
     "start": "node dist/index.js",
+    "lint": "tsc --noEmit",
     "test": "vitest run"
   },
   "engines": {
     "node": ">=20"
   },
   "dependencies": {
+    "eth-crypto": "^2.6.0",
     "fastify": "^4.28.1",
     "uuid": "^11.1.0",
-    "zod": "^3.24.2",
-    "eth-crypto": "^2.6.0"
+    "zod": "^3.24.2"
   },
   "devDependencies": {
     "@types/node": "^20.17.24",

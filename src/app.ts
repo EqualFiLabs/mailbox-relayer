@@ -22,9 +22,18 @@ export function buildApp(
       return reply.status(400).send({ error: parsed.error.flatten() });
     }
 
+    const envelope = {
+      version: parsed.data.version,
+      recipient: parsed.data.recipient,
+      cipher: parsed.data.cipher,
+      createdAt: parsed.data.createdAt,
+      ...(parsed.data.expiresAt ? { expiresAt: parsed.data.expiresAt } : {}),
+      ...(parsed.data.traceId ? { traceId: parsed.data.traceId } : {}),
+    };
+
     const message: StoredMessage = {
       id: randomUUID(),
-      envelope: parsed.data,
+      envelope,
       status: 'queued',
     };
 

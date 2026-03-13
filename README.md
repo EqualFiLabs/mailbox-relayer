@@ -71,6 +71,7 @@ Example request:
 ```bash
 npm install
 npm run dev
+npm run lint
 npm test
 ```
 
