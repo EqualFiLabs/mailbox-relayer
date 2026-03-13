@@ -72,6 +72,7 @@ Environment variables:
 - `USAGE_SETTLEMENT_INTERVAL_MS` (default `30000`)
 - `USAGE_SETTLEMENT_WEBHOOK_URL` (optional; external signer/settlement worker endpoint)
 - `USAGE_SETTLEMENT_WEBHOOK_TOKEN` (optional; bearer token for settlement webhook)
+- `ADMIN_AUTH_TOKEN` (optional; when set, protects POST endpoints like `/metering/run`, `/killswitch/retries/run`, `/settlement/run` via Bearer token)
 
 Durable SQLite state includes:
 - mailbox messages
