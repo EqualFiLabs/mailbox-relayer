@@ -11,6 +11,9 @@ Offchain mailbox relayer service for EqualFi.
 - `POST /demo/vertical-flow` - run mocked end-to-end flow (encrypt → queue → adapter execute → callback + ack)
 - `POST /events/onchain` - ingest on-chain lifecycle events (single event or batch)
 - `GET /agreements/:agreementId/state` - inspect relayer agreement state machine view
+- `POST /metering/run` - execute deterministic metering poll once (all agreements or one)
+- `GET /metering/submissions` - inspect prepared batched registerUsage submissions
+- `GET /metering/status` - scheduler status
 
 ## Canonical envelope schema (v1)
 
@@ -55,11 +58,14 @@ Environment variables:
 - `VENICE_API_KEY` (required for live Venice operations)
 - `VENICE_BASE_URL` (optional, default `https://api.venice.ai/api/v1`)
 - `RELAYER_DB_PATH` (optional; when set, enables durable SQLite state store)
+- `METERING_ENABLED` (`true`/`false`, default `false`)
+- `METERING_INTERVAL_MS` (default `30000`)
 
 Durable SQLite state includes:
 - mailbox messages
 - provider resource links (`agreementId -> providerResourceId`)
 - usage checkpoints
+- prepared usage submission batches (`registerUsage` payload staging)
 - processed event keys (idempotency)
 
 ## Step 4 vertical demo flow
@@ -117,6 +123,31 @@ Supported `eventType` values:
 Idempotency:
 - dedupe key is `chainId:blockNumber:logIndex`
 - processed keys persist when `RELAYER_DB_PATH` is set
+
+## Deterministic metering loop (Phase 2)
+
+- Poll source agreements from persisted provider links
+- Poll provider usage using per-agreement checkpoint windows (`from` -> `to`)
+- Aggregate usage deterministically by canonical `unitType`
+- Stage batched registerUsage payloads in durable store (`usage_submissions`)
+- Update usage checkpoints after each successful polling window
+- On breach/default events, perform a **final metering pass** before key termination attempt
+
+Run once manually:
+
+```bash
+curl -X POST http://localhost:3000/metering/run \
+  -H 'content-type: application/json' \
+  -d '{"to":"2026-03-10T21:01:00.000Z"}'
+```
+
+Run one agreement/final pass manually:
+
+```bash
+curl -X POST http://localhost:3000/metering/run \
+  -H 'content-type: application/json' \
+  -d '{"agreementId":"agreement-123","finalPass":true}'
+```
 
 ## Development
 

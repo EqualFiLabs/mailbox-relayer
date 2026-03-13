@@ -33,6 +33,21 @@ export interface AgreementStateRecord {
   traceId?: string;
 }
 
+export interface UsageSubmissionRecord {
+  id: string;
+  agreementId: string;
+  provider: ComputeProvider;
+  to: string;
+  usageDigest: string;
+  items: Array<{
+    unitType: string;
+    amount: string;
+  }>;
+  finalPass: boolean;
+  createdAt: string;
+  from?: string;
+}
+
 export interface MessageStore {
   save(message: StoredMessage): StoredMessage;
   get(id: string): StoredMessage | undefined;
@@ -40,9 +55,13 @@ export interface MessageStore {
 
   setProviderLink(link: ProviderResourceLink): void;
   getProviderLink(agreementId: string): ProviderResourceLink | undefined;
+  listProviderLinks(): ProviderResourceLink[];
 
   setUsageCheckpoint(checkpoint: UsageCheckpoint): void;
   getUsageCheckpoint(agreementId: string): UsageCheckpoint | undefined;
+
+  addUsageSubmission(record: UsageSubmissionRecord): void;
+  listUsageSubmissions(limit?: number): UsageSubmissionRecord[];
 
   setAgreementState(record: AgreementStateRecord): void;
   getAgreementState(agreementId: string): AgreementStateRecord | undefined;
@@ -54,6 +73,7 @@ export class InMemoryMessageStore implements MessageStore {
   private readonly messages = new Map<string, StoredMessage>();
   private readonly providerLinks = new Map<string, ProviderResourceLink>();
   private readonly usageCheckpoints = new Map<string, UsageCheckpoint>();
+  private readonly usageSubmissions: UsageSubmissionRecord[] = [];
   private readonly agreementStates = new Map<string, AgreementStateRecord>();
   private readonly processedEvents = new Set<string>();
 
@@ -82,12 +102,24 @@ export class InMemoryMessageStore implements MessageStore {
     return this.providerLinks.get(agreementId);
   }
 
+  listProviderLinks(): ProviderResourceLink[] {
+    return [...this.providerLinks.values()].sort((a, b) => a.agreementId.localeCompare(b.agreementId));
+  }
+
   setUsageCheckpoint(checkpoint: UsageCheckpoint): void {
     this.usageCheckpoints.set(checkpoint.agreementId, checkpoint);
   }
 
   getUsageCheckpoint(agreementId: string): UsageCheckpoint | undefined {
     return this.usageCheckpoints.get(agreementId);
+  }
+
+  addUsageSubmission(record: UsageSubmissionRecord): void {
+    this.usageSubmissions.push(record);
+  }
+
+  listUsageSubmissions(limit = 50): UsageSubmissionRecord[] {
+    return this.usageSubmissions.slice(-limit).reverse();
   }
 
   setAgreementState(record: AgreementStateRecord): void {
@@ -143,6 +175,18 @@ export class SQLiteMessageStore implements MessageStore {
         state TEXT NOT NULL,
         trace_id TEXT,
         updated_at TEXT NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS usage_submissions (
+        id TEXT PRIMARY KEY,
+        agreement_id TEXT NOT NULL,
+        provider TEXT NOT NULL,
+        from_ts TEXT,
+        to_ts TEXT NOT NULL,
+        usage_digest TEXT NOT NULL,
+        items_json TEXT NOT NULL,
+        final_pass INTEGER NOT NULL,
+        created_at TEXT NOT NULL
       );
 
       CREATE TABLE IF NOT EXISTS processed_events (
@@ -245,6 +289,28 @@ export class SQLiteMessageStore implements MessageStore {
     };
   }
 
+  listProviderLinks(): ProviderResourceLink[] {
+    const rows = this.db
+      .prepare(
+        `SELECT agreement_id, provider, provider_resource_id, updated_at
+         FROM provider_links
+         ORDER BY agreement_id ASC`
+      )
+      .all() as Array<{
+      agreement_id: string;
+      provider: ComputeProvider;
+      provider_resource_id: string;
+      updated_at: string;
+    }>;
+
+    return rows.map((row) => ({
+      agreementId: row.agreement_id,
+      provider: row.provider,
+      providerResourceId: row.provider_resource_id,
+      updatedAt: row.updated_at,
+    }));
+  }
+
   setUsageCheckpoint(checkpoint: UsageCheckpoint): void {
     this.db
       .prepare(
@@ -291,6 +357,59 @@ export class SQLiteMessageStore implements MessageStore {
       ...(row.last_usage_digest ? { lastUsageDigest: row.last_usage_digest } : {}),
       updatedAt: row.updated_at,
     };
+  }
+
+  addUsageSubmission(record: UsageSubmissionRecord): void {
+    this.db
+      .prepare(
+        `INSERT INTO usage_submissions
+         (id, agreement_id, provider, from_ts, to_ts, usage_digest, items_json, final_pass, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      )
+      .run(
+        record.id,
+        record.agreementId,
+        record.provider,
+        record.from ?? null,
+        record.to,
+        record.usageDigest,
+        JSON.stringify(record.items),
+        record.finalPass ? 1 : 0,
+        record.createdAt
+      );
+  }
+
+  listUsageSubmissions(limit = 50): UsageSubmissionRecord[] {
+    const rows = this.db
+      .prepare(
+        `SELECT id, agreement_id, provider, from_ts, to_ts, usage_digest, items_json, final_pass, created_at
+         FROM usage_submissions
+         ORDER BY created_at DESC
+         LIMIT ?`
+      )
+      .all(limit) as Array<{
+      id: string;
+      agreement_id: string;
+      provider: ComputeProvider;
+      from_ts: string | null;
+      to_ts: string;
+      usage_digest: string;
+      items_json: string;
+      final_pass: number;
+      created_at: string;
+    }>;
+
+    return rows.map((row) => ({
+      id: row.id,
+      agreementId: row.agreement_id,
+      provider: row.provider,
+      ...(row.from_ts ? { from: row.from_ts } : {}),
+      to: row.to_ts,
+      usageDigest: row.usage_digest,
+      items: JSON.parse(row.items_json),
+      finalPass: Boolean(row.final_pass),
+      createdAt: row.created_at,
+    }));
   }
 
   setAgreementState(record: AgreementStateRecord): void {
