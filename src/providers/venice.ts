@@ -182,14 +182,11 @@ export class VeniceComputeAdapter implements ComputeProviderAdapter {
       };
     }
 
-    const nowIso = new Date().toISOString();
-
     // Best-effort clamp before delete.
     await this.request('PATCH', '/api_keys', {
       body: {
         id: request.providerResourceId,
         consumptionLimit: { usd: 0 },
-        expiresAt: nowIso,
       },
     });
 
@@ -200,12 +197,16 @@ export class VeniceComputeAdapter implements ComputeProviderAdapter {
     ];
 
     const deleteOk = deleteAttempts.some((result) => result.ok);
+    const deleteNotFound = deleteAttempts.some(
+      (result) => !result.ok && /could not be found|not found/i.test(result.error ?? '')
+    );
+    const terminated = deleteOk || deleteNotFound;
 
     return {
-      status: deleteOk ? 'ok' : 'error',
+      status: terminated ? 'ok' : 'error',
       provider: this.provider,
-      terminated: deleteOk,
-      message: deleteOk ? 'Venice key revoked.' : 'Failed to revoke Venice key.',
+      terminated,
+      message: terminated ? 'Venice key revoked.' : 'Failed to revoke Venice key.',
       meta: {
         agreementId: request.agreementId,
         providerResourceId: request.providerResourceId,

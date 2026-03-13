@@ -81,10 +81,10 @@ describe('VeniceComputeAdapter', () => {
       calls.push({ url, method });
 
       if (method === 'PATCH') {
-        return makeResponse({ ok: false, status: 404, json: { error: 'not found' } });
+        return makeResponse({ ok: true, status: 200, json: { ok: true } });
       }
 
-      if (method === 'DELETE' && url.endsWith('/api_keys/key_123')) {
+      if (method === 'DELETE' && url.includes('/api_keys?id=key_123')) {
         return makeResponse({ ok: true, status: 200, json: { ok: true } });
       }
 
@@ -97,6 +97,28 @@ describe('VeniceComputeAdapter', () => {
     expect(result.status).toBe('ok');
     expect(result.terminated).toBe(true);
     expect(calls.find((c) => c.method === 'PATCH')).toBeTruthy();
-    expect(calls.find((c) => c.method === 'DELETE')).toBeTruthy();
+    expect(calls.find((c) => c.method === 'DELETE' && c.url.includes('/api_keys?id=key_123'))).toBeTruthy();
+  });
+
+  it('treats not-found delete as already-terminated', async () => {
+    const mockFetch: typeof fetch = async (_input, init) => {
+      const method = (init?.method ?? 'GET').toUpperCase();
+
+      if (method === 'PATCH') {
+        return makeResponse({ ok: true, status: 200, json: { ok: true } });
+      }
+
+      if (method === 'DELETE') {
+        return makeResponse({ ok: false, status: 400, json: { error: 'API key could not be found' } });
+      }
+
+      return makeResponse({ ok: false, status: 400, json: { error: 'bad request' } });
+    };
+
+    const adapter = new VeniceComputeAdapter({ apiKey: 'admin-key', fetchFn: mockFetch });
+    const result = await adapter.terminate({ agreementId: 'agreement-1', providerResourceId: 'key_404' });
+
+    expect(result.status).toBe('ok');
+    expect(result.terminated).toBe(true);
   });
 });
