@@ -2,12 +2,12 @@ import Fastify from 'fastify';
 import { randomUUID } from 'node:crypto';
 import { MailboxCompat } from './mailbox';
 import { canonicalEnvelopeSchema, ackSchema, demoVerticalFlowSchema } from './schema';
-import { InMemoryMessageStore } from './store';
+import { createDefaultStore, MessageStore } from './store';
 import { StoredMessage } from './types';
 import { ComputeAdapterRegistry, createDefaultComputeAdapterRegistry } from './providers';
 
 export function buildApp(
-  store = new InMemoryMessageStore(),
+  store: MessageStore = createDefaultStore(),
   providerRegistry: ComputeAdapterRegistry = createDefaultComputeAdapterRegistry()
 ) {
   const app = Fastify({ logger: true });
@@ -139,6 +139,15 @@ export function buildApp(
       policy: { mode: 'mock' },
     });
 
+    if (provision.providerResourceId) {
+      store.setProviderLink({
+        agreementId,
+        provider,
+        providerResourceId: provision.providerResourceId,
+        updatedAt: new Date().toISOString(),
+      });
+    }
+
     // Provider callback payload -> encrypted for borrower
     const providerCallbackPayload = {
       kind: 'provider_payload',
@@ -183,6 +192,14 @@ export function buildApp(
         },
       },
     }));
+
+    store.setUsageCheckpoint({
+      agreementId,
+      provider,
+      lastUsageTimestamp: new Date().toISOString(),
+      lastUsageDigest: `demo-${traceId}`,
+      updatedAt: new Date().toISOString(),
+    });
 
     const decryptedProviderCallback = JSON.parse(
       await MailboxCompat.decryptPayload(borrower.privateKey, encryptedProviderCallback)
