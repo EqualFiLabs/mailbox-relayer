@@ -138,4 +138,26 @@ describe('onchain event ingestion', () => {
     expect(state.statusCode).toBe(200);
     expect(state.json().state).toBe('breach_detected');
   });
+
+  it('accepts bankr activation routing with canonical provider', async () => {
+    const ingest = await app.inject({
+      method: 'POST',
+      url: '/events/onchain',
+      headers: adminHeaders,
+      payload: {
+        chainId: 84532,
+        blockNumber: 301,
+        logIndex: 0,
+        eventType: 'activation',
+        agreementId: 'agreement-bankr-activation-1',
+        provider: 'bankr',
+      },
+    });
+
+    expect(ingest.statusCode).toBe(200);
+    const body = ingest.json();
+    expect(body.results[0].action).toBe('activation_processed');
+    expect(body.results[0].provider).toBe('bankr');
+    expect(['ok', 'error', 'not_implemented']).toContain(body.results[0].meta.providerResultStatus);
+  });
 });
