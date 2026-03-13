@@ -58,7 +58,8 @@ Scaffolded provider adapter contracts live in `src/providers/`:
 - `registry.ts` → no-lock-in adapter registry + default registration
 
 Current status:
-- `venice` adapter has a live HTTP implementation scaffold (key create, usage read, revoke flow)
+- `venice` adapter has a live HTTP implementation scaffold (key create, paginated usage read, revoke flow)
+- Venice metering fails closed: unmappable/invalid usage rows are quarantined and surfaced as errors
 - `lambda` and `runpod` remain stubbed
 
 Environment variables:
@@ -75,6 +76,7 @@ Environment variables:
 - `USAGE_SETTLEMENT_WEBHOOK_URL` (optional; external signer/settlement worker endpoint)
 - `USAGE_SETTLEMENT_WEBHOOK_TOKEN` (optional; bearer token for settlement webhook)
 - `ADMIN_AUTH_TOKEN` (optional; when set, protects POST endpoints like `/metering/run`, `/killswitch/retries/run`, `/settlement/run` via Bearer token)
+  - `/events/onchain` is strict: it always requires Bearer auth and returns `503` if `ADMIN_AUTH_TOKEN` is unset
 - `ALERT_WEBHOOK_URL` (optional; when set, enables webhook alerts for failures)
 - `ALERT_WEBHOOK_TOKEN` (optional; bearer token for alert webhook)
 

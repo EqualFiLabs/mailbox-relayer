@@ -72,6 +72,65 @@ describe('VeniceComputeAdapter', () => {
     expect(result.usage[1]).toMatchObject({ unitType: 'VENICE_TEXT_TOKEN_OUT', amount: '45' });
   });
 
+  it('paginates usage rows when provider signals additional pages', async () => {
+    const calls: string[] = [];
+    const mockFetch: typeof fetch = async (input) => {
+      const url = String(input);
+      calls.push(url);
+
+      if (url.includes('page=2')) {
+        return makeResponse({
+          ok: true,
+          status: 200,
+          json: {
+            data: [{ sku: 'completion_tokens', amount: 7, timestamp: '2026-03-10T20:02:00.000Z', requestId: 'r2' }],
+            pagination: { page: 2, totalPages: 2 },
+          },
+        });
+      }
+
+      return makeResponse({
+        ok: true,
+        status: 200,
+        json: {
+          data: [{ sku: 'prompt_tokens', amount: 11, timestamp: '2026-03-10T20:01:00.000Z', requestId: 'r1' }],
+          pagination: { page: 1, totalPages: 2 },
+        },
+      });
+    };
+
+    const adapter = new VeniceComputeAdapter({ apiKey: 'admin-key', fetchFn: mockFetch });
+    const result = await adapter.usage({ agreementId: 'agreement-1' });
+
+    expect(result.status).toBe('ok');
+    expect(calls.length).toBe(2);
+    expect(result.usage).toHaveLength(2);
+    expect(result.usage[0]).toMatchObject({ unitType: 'VENICE_TEXT_TOKEN_IN', amount: '11' });
+    expect(result.usage[1]).toMatchObject({ unitType: 'VENICE_TEXT_TOKEN_OUT', amount: '7' });
+  });
+
+  it('quarantines unmappable/invalid rows instead of silently dropping', async () => {
+    const mockFetch: typeof fetch = async () =>
+      makeResponse({
+        ok: true,
+        status: 200,
+        json: {
+          data: [
+            { sku: 'custom_unknown_metric', amount: 10, timestamp: '2026-03-10T20:00:00.000Z' },
+            { sku: 'prompt_tokens', amount: 'nan', timestamp: '2026-03-10T20:01:00.000Z' },
+          ],
+        },
+      });
+
+    const adapter = new VeniceComputeAdapter({ apiKey: 'admin-key', fetchFn: mockFetch });
+    const result = await adapter.usage({ agreementId: 'agreement-1' });
+
+    expect(result.status).toBe('error');
+    expect(result.usage).toHaveLength(0);
+    expect(result.message).toMatch(/quarantined/i);
+    expect(result.meta?.quarantinedCount).toBe(2);
+  });
+
   it('terminates key when delete endpoint succeeds', async () => {
     const calls: Array<{ url: string; method: string }> = [];
 

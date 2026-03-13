@@ -14,6 +14,7 @@ interface VeniceAdapterOptions {
   apiKey?: string;
   baseUrl?: string;
   fetchFn?: FetchLike;
+  maxUsagePages?: number;
 }
 
 interface VeniceApiResponse<T = unknown> {
@@ -27,11 +28,13 @@ export class VeniceComputeAdapter implements ComputeProviderAdapter {
   private readonly apiKey: string | undefined;
   private readonly baseUrl: string;
   private readonly fetchFn: FetchLike;
+  private readonly maxUsagePages: number;
 
   constructor(options: VeniceAdapterOptions = {}) {
     this.apiKey = options.apiKey ?? process.env.VENICE_API_KEY;
     this.baseUrl = (options.baseUrl ?? process.env.VENICE_BASE_URL ?? 'https://api.venice.ai/api/v1').replace(/\/$/, '');
     this.fetchFn = options.fetchFn ?? fetch;
+    this.maxUsagePages = options.maxUsagePages ?? 50;
   }
 
   async provision(request: ProvisionRequest): Promise<ProvisionResult> {
@@ -113,41 +116,51 @@ export class VeniceComputeAdapter implements ComputeProviderAdapter {
       };
     }
 
-    const query = new URLSearchParams();
-    if (request.from) query.set('startDate', request.from);
-    if (request.to) query.set('endDate', request.to);
+    const baseQuery = new URLSearchParams();
+    if (request.from) baseQuery.set('startDate', request.from);
+    if (request.to) baseQuery.set('endDate', request.to);
 
-    const usageResp = await this.request<VeniceApiResponse<Record<string, unknown>>>(
-      'GET',
-      `/billing/usage${query.size > 0 ? `?${query}` : ''}`
-    );
-
-    if (!usageResp.ok || !usageResp.data) {
+    const pages = await this.fetchUsagePages(baseQuery);
+    if (!pages.ok) {
       return {
         status: 'error',
         provider: this.provider,
         usage: [],
-        message: usageResp.error ?? 'Failed to fetch Venice usage.',
-        meta: { agreementId: request.agreementId, statusCode: usageResp.statusCode },
+        message: pages.error ?? 'Failed to fetch Venice usage.',
+        meta: {
+          agreementId: request.agreementId,
+          ...(pages.statusCode !== undefined ? { statusCode: pages.statusCode } : {}),
+        },
       };
     }
 
-    const rows = this.extractUsageRows(usageResp.data);
+    const usage: UsageResult['usage'] = [];
+    const quarantined: Array<{ reason: string; row: Record<string, unknown> }> = [];
 
-    const usage = rows.map((row) => {
-      const unitTypeRaw = this.pickFirstString(row, ['unitType', 'sku', 'type', 'metric']) ?? 'UNKNOWN';
-      const amount = this.pickFirstNumber(row, ['amount', 'value', 'quantity', 'units']) ?? 0;
-      const observedAt =
-        this.pickFirstString(row, ['observedAt', 'timestamp', 'createdAt', 'date']) ?? new Date().toISOString();
-      const requestId = this.pickFirstString(row, ['requestId', 'id']);
+    for (const row of pages.rows) {
+      const normalized = this.normalizeUsageRow(row);
+      if (normalized.ok) {
+        usage.push(normalized.row);
+      } else {
+        quarantined.push({ reason: normalized.reason, row });
+      }
+    }
 
+    if (quarantined.length > 0) {
       return {
-        unitType: this.mapVeniceUnitType(unitTypeRaw),
-        amount: String(amount),
-        observedAt,
-        ...(requestId ? { requestId } : {}),
+        status: 'error',
+        provider: this.provider,
+        usage: [],
+        message: 'Usage rows quarantined due to unmappable/invalid fields.',
+        meta: {
+          agreementId: request.agreementId,
+          providerResourceId: request.providerResourceId,
+          rowCount: pages.rows.length,
+          quarantinedCount: quarantined.length,
+          quarantinedSample: quarantined.slice(0, 5),
+        },
       };
-    });
+    }
 
     return {
       status: 'ok',
@@ -156,7 +169,8 @@ export class VeniceComputeAdapter implements ComputeProviderAdapter {
       meta: {
         agreementId: request.agreementId,
         providerResourceId: request.providerResourceId,
-        rowCount: rows.length,
+        rowCount: pages.rows.length,
+        pagesFetched: pages.pagesFetched,
       },
     };
   }
@@ -292,7 +306,7 @@ export class VeniceComputeAdapter implements ComputeProviderAdapter {
     return [];
   }
 
-  private mapVeniceUnitType(raw: string): string {
+  private mapVeniceUnitType(raw: string): string | undefined {
     const normalized = raw.toUpperCase();
 
     if (normalized.includes('INPUT') || normalized.includes('PROMPT')) return 'VENICE_TEXT_TOKEN_IN';
@@ -303,7 +317,7 @@ export class VeniceComputeAdapter implements ComputeProviderAdapter {
       return 'VENICE_AUDIO_STT_SEC';
     }
 
-    return `VENICE_${normalized.replace(/[^A-Z0-9]+/g, '_').replace(/^_+|_+$/g, '') || 'UNKNOWN'}`;
+    return undefined;
   }
 
   private pickFirstString(obj: Record<string, unknown>, keys: string[]): string | undefined {
@@ -321,6 +335,163 @@ export class VeniceComputeAdapter implements ComputeProviderAdapter {
       if (typeof value === 'string' && value.trim() !== '' && !Number.isNaN(Number(value))) return Number(value);
     }
     return undefined;
+  }
+
+  private normalizeUsageRow(
+    row: Record<string, unknown>
+  ): { ok: true; row: UsageResult['usage'][number] } | { ok: false; reason: string } {
+    const unitTypeRaw = this.pickFirstString(row, ['unitType', 'sku', 'type', 'metric']);
+    if (!unitTypeRaw) {
+      return { ok: false, reason: 'missing_unit_type' };
+    }
+
+    const unitType = this.mapVeniceUnitType(unitTypeRaw);
+    if (!unitType) {
+      return { ok: false, reason: 'unmappable_unit_type' };
+    }
+
+    const amountRaw = row.amount ?? row.value ?? row.quantity ?? row.units;
+    const amount = this.toDecimalString(amountRaw);
+    if (!amount) {
+      return { ok: false, reason: 'invalid_amount' };
+    }
+
+    const observedAtRaw = this.pickFirstString(row, ['observedAt', 'timestamp', 'createdAt', 'date']);
+    if (!observedAtRaw || Number.isNaN(Date.parse(observedAtRaw))) {
+      return { ok: false, reason: 'invalid_observed_at' };
+    }
+
+    const requestId = this.pickFirstString(row, ['requestId', 'id']);
+
+    return {
+      ok: true,
+      row: {
+        unitType,
+        amount,
+        observedAt: observedAtRaw,
+        ...(requestId ? { requestId } : {}),
+      },
+    };
+  }
+
+  private toDecimalString(value: unknown): string | undefined {
+    if (typeof value === 'number' && Number.isFinite(value)) {
+      if (value < 0) return undefined;
+      return String(value);
+    }
+
+    if (typeof value === 'string') {
+      const trimmed = value.trim();
+      if (!/^\d+(\.\d+)?$/.test(trimmed)) return undefined;
+      return trimmed;
+    }
+
+    return undefined;
+  }
+
+  private async fetchUsagePages(
+    baseQuery: URLSearchParams
+  ): Promise<{ ok: true; rows: Array<Record<string, unknown>>; pagesFetched: number } | {
+    ok: false;
+    error?: string;
+    statusCode?: number;
+  }> {
+    const rows: Array<Record<string, unknown>> = [];
+    const visitedTokens = new Set<string>();
+    let pagesFetched = 0;
+    let cursor: string | undefined;
+    let page = 1;
+
+    while (pagesFetched < this.maxUsagePages) {
+      const query = new URLSearchParams(baseQuery);
+      if (cursor) {
+        query.set('cursor', cursor);
+      } else if (page > 1) {
+        query.set('page', String(page));
+      }
+
+      const usageResp = await this.request<Record<string, unknown>>(
+        'GET',
+        `/billing/usage${query.size > 0 ? `?${query}` : ''}`
+      );
+
+      if (!usageResp.ok || !usageResp.data) {
+        const errorResult: { ok: false; error?: string; statusCode?: number } = {
+          ok: false,
+          error: usageResp.error ?? 'Failed to fetch Venice usage.',
+          ...(usageResp.statusCode !== undefined ? { statusCode: usageResp.statusCode } : {}),
+        };
+
+        return {
+          ...errorResult,
+        };
+      }
+
+      rows.push(...this.extractUsageRows(usageResp.data));
+      pagesFetched += 1;
+
+      const nextCursor = this.extractNextCursor(usageResp.data);
+      if (nextCursor) {
+        if (visitedTokens.has(nextCursor)) break;
+        visitedTokens.add(nextCursor);
+        cursor = nextCursor;
+        continue;
+      }
+
+      if (this.extractHasMorePages(usageResp.data)) {
+        page += 1;
+        continue;
+      }
+
+      break;
+    }
+
+    return { ok: true, rows, pagesFetched };
+  }
+
+  private extractNextCursor(input: unknown): string | undefined {
+    if (!input || typeof input !== 'object') return undefined;
+    const root = input as Record<string, unknown>;
+
+    const direct = this.pickFirstString(root, ['nextCursor', 'next_cursor', 'cursor', 'nextPageToken', 'after']);
+    if (direct) return direct;
+
+    const containers = [root.pagination, root.meta, root.data];
+    for (const container of containers) {
+      if (!container || typeof container !== 'object' || Array.isArray(container)) continue;
+      const next = this.pickFirstString(container as Record<string, unknown>, [
+        'nextCursor',
+        'next_cursor',
+        'cursor',
+        'nextPageToken',
+        'after',
+      ]);
+      if (next) return next;
+    }
+
+    return undefined;
+  }
+
+  private extractHasMorePages(input: unknown): boolean {
+    if (!input || typeof input !== 'object') return false;
+    const root = input as Record<string, unknown>;
+    const containers = [root, root.pagination, root.meta, root.data];
+
+    for (const container of containers) {
+      if (!container || typeof container !== 'object' || Array.isArray(container)) continue;
+      const obj = container as Record<string, unknown>;
+
+      if (typeof obj.hasMore === 'boolean') return obj.hasMore;
+      if (typeof obj.has_more === 'boolean') return obj.has_more;
+
+      const currentPage = this.pickFirstNumber(obj, ['page', 'currentPage', 'current_page']);
+      const totalPages = this.pickFirstNumber(obj, ['totalPages', 'total_pages', 'pages']);
+      if (currentPage !== undefined && totalPages !== undefined) {
+        return currentPage < totalPages;
+      }
+    }
+
+    return false;
   }
 
   private readString(source: Record<string, unknown> | undefined, keys: string[]): string | undefined {
