@@ -1,20 +1,69 @@
 import Fastify from 'fastify';
 import { randomUUID } from 'node:crypto';
 import { MailboxCompat } from './mailbox';
-import { canonicalEnvelopeSchema, ackSchema, demoVerticalFlowSchema } from './schema';
+import {
+  canonicalEnvelopeSchema,
+  ackSchema,
+  demoVerticalFlowSchema,
+  onchainEventBatchSchema,
+  onchainEventSchema,
+} from './schema';
 import { createDefaultStore, MessageStore } from './store';
 import { StoredMessage } from './types';
 import { ComputeAdapterRegistry, createDefaultComputeAdapterRegistry } from './providers';
+import { OnchainEventIngestionWorker } from './events';
 
 export function buildApp(
   store: MessageStore = createDefaultStore(),
   providerRegistry: ComputeAdapterRegistry = createDefaultComputeAdapterRegistry()
 ) {
   const app = Fastify({ logger: true });
+  const onchainWorker = new OnchainEventIngestionWorker(store, providerRegistry);
 
   app.get('/health', async () => ({ ok: true }));
 
   app.get('/providers', async () => ({ providers: providerRegistry.list() }));
+
+  app.post('/events/onchain', async (request, reply) => {
+    const singleParsed = onchainEventSchema.safeParse(request.body);
+
+    let events;
+    if (singleParsed.success) {
+      events = [singleParsed.data];
+    } else {
+      const batchParsed = onchainEventBatchSchema.safeParse(request.body);
+      if (!batchParsed.success) {
+        return reply.status(400).send({
+          error: 'invalid_onchain_event_payload',
+          details: {
+            single: singleParsed.error.flatten(),
+            batch: batchParsed.error.flatten(),
+          },
+        });
+      }
+      events = batchParsed.data.events;
+    }
+
+    const results = await onchainWorker.ingestMany(events);
+
+    return reply.send({
+      accepted: results.filter((r) => r.accepted).length,
+      deduped: results.filter((r) => r.deduped).length,
+      rejected: results.filter((r) => !r.accepted).length,
+      results,
+    });
+  });
+
+  app.get('/agreements/:agreementId/state', async (request, reply) => {
+    const { agreementId } = request.params as { agreementId: string };
+    const state = store.getAgreementState(agreementId);
+
+    if (!state) {
+      return reply.status(404).send({ error: 'agreement_state_not_found' });
+    }
+
+    return state;
+  });
 
   app.post('/messages', async (request, reply) => {
     const parsed = canonicalEnvelopeSchema.safeParse(request.body);

@@ -1,21 +1,36 @@
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import Database from 'better-sqlite3';
+import { ComputeProvider } from './providers/types';
 import { StoredMessage } from './types';
 
 export interface ProviderResourceLink {
   agreementId: string;
-  provider: string;
+  provider: ComputeProvider;
   providerResourceId: string;
   updatedAt: string;
 }
 
 export interface UsageCheckpoint {
   agreementId: string;
-  provider: string;
+  provider: ComputeProvider;
   lastUsageTimestamp?: string;
   lastUsageDigest?: string;
   updatedAt: string;
+}
+
+export type AgreementState =
+  | 'active'
+  | 'activation_failed'
+  | 'mailbox_received'
+  | 'breach_detected'
+  | 'default_detected';
+
+export interface AgreementStateRecord {
+  agreementId: string;
+  state: AgreementState;
+  updatedAt: string;
+  traceId?: string;
 }
 
 export interface MessageStore {
@@ -29,6 +44,9 @@ export interface MessageStore {
   setUsageCheckpoint(checkpoint: UsageCheckpoint): void;
   getUsageCheckpoint(agreementId: string): UsageCheckpoint | undefined;
 
+  setAgreementState(record: AgreementStateRecord): void;
+  getAgreementState(agreementId: string): AgreementStateRecord | undefined;
+
   markEventProcessed(eventKey: string, blockNumber: number, logIndex: number): boolean;
 }
 
@@ -36,6 +54,7 @@ export class InMemoryMessageStore implements MessageStore {
   private readonly messages = new Map<string, StoredMessage>();
   private readonly providerLinks = new Map<string, ProviderResourceLink>();
   private readonly usageCheckpoints = new Map<string, UsageCheckpoint>();
+  private readonly agreementStates = new Map<string, AgreementStateRecord>();
   private readonly processedEvents = new Set<string>();
 
   save(message: StoredMessage): StoredMessage {
@@ -69,6 +88,14 @@ export class InMemoryMessageStore implements MessageStore {
 
   getUsageCheckpoint(agreementId: string): UsageCheckpoint | undefined {
     return this.usageCheckpoints.get(agreementId);
+  }
+
+  setAgreementState(record: AgreementStateRecord): void {
+    this.agreementStates.set(record.agreementId, record);
+  }
+
+  getAgreementState(agreementId: string): AgreementStateRecord | undefined {
+    return this.agreementStates.get(agreementId);
   }
 
   markEventProcessed(eventKey: string): boolean {
@@ -108,6 +135,13 @@ export class SQLiteMessageStore implements MessageStore {
         provider TEXT NOT NULL,
         last_usage_timestamp TEXT,
         last_usage_digest TEXT,
+        updated_at TEXT NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS agreement_states (
+        agreement_id TEXT PRIMARY KEY,
+        state TEXT NOT NULL,
+        trace_id TEXT,
         updated_at TEXT NOT NULL
       );
 
@@ -195,7 +229,7 @@ export class SQLiteMessageStore implements MessageStore {
       .get(agreementId) as
       | {
           agreement_id: string;
-          provider: string;
+          provider: ComputeProvider;
           provider_resource_id: string;
           updated_at: string;
         }
@@ -241,7 +275,7 @@ export class SQLiteMessageStore implements MessageStore {
       .get(agreementId) as
       | {
           agreement_id: string;
-          provider: string;
+          provider: ComputeProvider;
           last_usage_timestamp: string | null;
           last_usage_digest: string | null;
           updated_at: string;
@@ -255,6 +289,44 @@ export class SQLiteMessageStore implements MessageStore {
       provider: row.provider,
       ...(row.last_usage_timestamp ? { lastUsageTimestamp: row.last_usage_timestamp } : {}),
       ...(row.last_usage_digest ? { lastUsageDigest: row.last_usage_digest } : {}),
+      updatedAt: row.updated_at,
+    };
+  }
+
+  setAgreementState(record: AgreementStateRecord): void {
+    this.db
+      .prepare(
+        `INSERT INTO agreement_states (agreement_id, state, trace_id, updated_at)
+         VALUES (?, ?, ?, ?)
+         ON CONFLICT(agreement_id) DO UPDATE SET
+           state = excluded.state,
+           trace_id = excluded.trace_id,
+           updated_at = excluded.updated_at`
+      )
+      .run(record.agreementId, record.state, record.traceId ?? null, record.updatedAt);
+  }
+
+  getAgreementState(agreementId: string): AgreementStateRecord | undefined {
+    const row = this.db
+      .prepare(
+        `SELECT agreement_id, state, trace_id, updated_at
+         FROM agreement_states WHERE agreement_id = ?`
+      )
+      .get(agreementId) as
+      | {
+          agreement_id: string;
+          state: AgreementState;
+          trace_id: string | null;
+          updated_at: string;
+        }
+      | undefined;
+
+    if (!row) return undefined;
+
+    return {
+      agreementId: row.agreement_id,
+      state: row.state,
+      ...(row.trace_id ? { traceId: row.trace_id } : {}),
       updatedAt: row.updated_at,
     };
   }
