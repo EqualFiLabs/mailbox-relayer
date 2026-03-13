@@ -114,4 +114,19 @@ describe('mailbox-relayer API', () => {
     expect(callbackMessage.statusCode).toBe(200);
     expect(callbackMessage.json().status).toBe('delivered');
   });
+
+  it('runs mocked vertical flow for bankr provider route', async () => {
+    const run = await app.inject({
+      method: 'POST',
+      url: '/demo/vertical-flow',
+      payload: { provider: 'bankr', agreementId: 'agreement-bankr-123', traceId: 'trace-bankr-xyz' },
+    });
+
+    expect(run.statusCode).toBe(200);
+    const result = run.json();
+    expect(result.agreementId).toBe('agreement-bankr-123');
+    expect(result.provider).toBe('bankr');
+    expect(['ok', 'error', 'not_implemented']).toContain(result.providerResultStatus);
+    expect(result.callbackRecorded).toBe(true);
+  });
 });

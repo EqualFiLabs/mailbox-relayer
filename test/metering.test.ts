@@ -76,6 +76,47 @@ class FakeVeniceAdapter implements ComputeProviderAdapter {
   }
 }
 
+class FakeBankrAdapter implements ComputeProviderAdapter {
+  readonly provider = 'bankr' as const;
+
+  async provision(request: ProvisionRequest): Promise<ProvisionResult> {
+    return {
+      status: 'ok',
+      provider: this.provider,
+      providerResourceId: `bankr-${request.agreementId}`,
+    };
+  }
+
+  async usage(_request: UsageRequest): Promise<UsageResult> {
+    return {
+      status: 'ok',
+      provider: this.provider,
+      usage: [
+        {
+          unitType: 'BANKR_TEXT_TOKEN_IN',
+          amount: '45',
+          observedAt: '2026-03-10T22:00:01.000Z',
+          requestId: 'bk-1',
+        },
+        {
+          unitType: 'BANKR_TEXT_TOKEN_OUT',
+          amount: '12',
+          observedAt: '2026-03-10T22:00:02.000Z',
+          requestId: 'bk-2',
+        },
+      ],
+    };
+  }
+
+  async terminate(_request: TerminateRequest): Promise<TerminateResult> {
+    return {
+      status: 'ok',
+      provider: this.provider,
+      terminated: true,
+    };
+  }
+}
+
 describe('deterministic metering loop', () => {
   const adminAuthToken = 'test-admin-token';
   const adminHeaders = { authorization: `Bearer ${adminAuthToken}` };
@@ -164,5 +205,52 @@ describe('deterministic metering loop', () => {
 
     const submissions = store.listUsageSubmissions(5);
     expect(submissions.some((s) => s.finalPass)).toBe(true);
+  });
+});
+
+describe('bankr metering support', () => {
+  const adminAuthToken = 'test-admin-token';
+  const adminHeaders = { authorization: `Bearer ${adminAuthToken}` };
+  const store = new InMemoryMessageStore();
+  const registry = new ComputeAdapterRegistry();
+  registry.register(new FakeBankrAdapter());
+
+  const app = buildApp(store, registry, undefined, undefined, undefined, undefined, undefined, undefined, {
+    adminAuthToken,
+  });
+
+  beforeAll(async () => {
+    await app.ready();
+    store.setProviderLink({
+      agreementId: 'agreement-meter-bankr-1',
+      provider: 'bankr',
+      providerResourceId: 'bankr-key-1',
+      updatedAt: '2026-03-10T21:59:00.000Z',
+    });
+  });
+
+  afterAll(async () => {
+    await app.close();
+  });
+
+  it('aggregates bankr-prefixed unit usage for bankr provider links', async () => {
+    const run = await app.inject({
+      method: 'POST',
+      url: '/metering/run',
+      headers: adminHeaders,
+      payload: {
+        agreementId: 'agreement-meter-bankr-1',
+        to: '2026-03-10T22:01:00.000Z',
+      },
+    });
+
+    expect(run.statusCode).toBe(200);
+    const body = run.json();
+    expect(body.results[0].provider).toBe('bankr');
+    expect(body.results[0].status).toBe('prepared');
+    expect(body.results[0].aggregatedItems).toEqual([
+      { unitType: 'BANKR_TEXT_TOKEN_IN', amount: '45' },
+      { unitType: 'BANKR_TEXT_TOKEN_OUT', amount: '12' },
+    ]);
   });
 });

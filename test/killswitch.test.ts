@@ -55,6 +55,37 @@ class FlakyVeniceAdapter implements ComputeProviderAdapter {
   }
 }
 
+class BankrTerminateAdapter implements ComputeProviderAdapter {
+  readonly provider = 'bankr' as const;
+
+  async provision(request: ProvisionRequest): Promise<ProvisionResult> {
+    return {
+      status: 'ok',
+      provider: this.provider,
+      providerResourceId: `bankr-${request.agreementId}`,
+    };
+  }
+
+  async usage(_request: UsageRequest): Promise<UsageResult> {
+    return {
+      status: 'ok',
+      provider: this.provider,
+      usage: [],
+    };
+  }
+
+  async terminate(_request: TerminateRequest): Promise<TerminateResult> {
+    return {
+      status: 'ok',
+      provider: this.provider,
+      terminated: true,
+      meta: {
+        providerAccessDisabled: true,
+      },
+    };
+  }
+}
+
 describe('kill-switch enforcement + retries', () => {
   const adminAuthToken = 'test-admin-token';
   const adminHeaders = { authorization: `Bearer ${adminAuthToken}` };
@@ -154,5 +185,56 @@ describe('kill-switch enforcement + retries', () => {
     expect(latest?.attempt).toBe(2);
     expect(latest?.status).toBe('ok');
     expect(latest?.terminated).toBe(true);
+  });
+});
+
+describe('kill-switch bankr support', () => {
+  const adminAuthToken = 'test-admin-token';
+  const adminHeaders = { authorization: `Bearer ${adminAuthToken}` };
+  const store = new InMemoryMessageStore();
+  const registry = new ComputeAdapterRegistry();
+  registry.register(new BankrTerminateAdapter());
+  const killSwitchService = new KillSwitchEnforcementService(store, registry);
+
+  const app = buildApp(store, registry, undefined, undefined, killSwitchService, undefined, undefined, undefined, {
+    adminAuthToken,
+  });
+
+  beforeAll(async () => {
+    await app.ready();
+    store.setProviderLink({
+      agreementId: 'agreement-kill-bankr-1',
+      provider: 'bankr',
+      providerResourceId: 'bankr-key-123',
+      updatedAt: new Date().toISOString(),
+    });
+  });
+
+  afterAll(async () => {
+    await app.close();
+  });
+
+  it('executes termination path for bankr links and records bankr provider attempts', async () => {
+    const ingest = await app.inject({
+      method: 'POST',
+      url: '/events/onchain',
+      headers: adminHeaders,
+      payload: {
+        chainId: 84532,
+        blockNumber: 610,
+        logIndex: 1,
+        eventType: 'breach',
+        agreementId: 'agreement-kill-bankr-1',
+      },
+    });
+
+    expect(ingest.statusCode).toBe(200);
+    const body = ingest.json();
+    expect(body.results[0].action).toBe('termination_attempted');
+    expect(body.results[0].provider).toBe('bankr');
+
+    const attempts = store.listTerminationAttempts('agreement-kill-bankr-1', 10);
+    expect(attempts[0]?.provider).toBe('bankr');
+    expect(attempts[0]?.terminated).toBe(true);
   });
 });
