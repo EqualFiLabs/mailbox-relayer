@@ -1,12 +1,24 @@
 export type MessageStatus = 'queued' | 'delivered';
 
-export interface StoredMessage {
-  id: string;
+export interface MailboxCipherPayload {
+  iv: string;
+  ephemPublicKey: string;
+  ciphertext: string;
+  mac: string;
+}
+
+export interface CanonicalMailboxEnvelope {
+  version: 'equalfi.mailbox.ecies.eth-crypto.v1';
   recipient: string;
-  payload: string;
-  traceId?: string;
+  cipher: MailboxCipherPayload;
   createdAt: string;
   expiresAt?: string;
+  traceId?: string;
+}
+
+export interface StoredMessage {
+  id: string;
+  envelope: CanonicalMailboxEnvelope;
   status: MessageStatus;
   deliveredAt?: string;
   ack?: {
