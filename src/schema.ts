@@ -40,7 +40,7 @@ export const ackSchema = z.object({
 });
 
 export const demoVerticalFlowSchema = z.object({
-  provider: z.enum(['lambda', 'runpod', 'venice']).default('venice'),
+  provider: z.enum(['lambda', 'runpod', 'venice', 'bankr']).default('venice'),
   agreementId: z.string().min(1).optional(),
   traceId: z.string().min(1).optional(),
 });
@@ -52,7 +52,7 @@ export const onchainEventSchema = z.object({
   txHash: z.string().min(1).optional(),
   eventType: z.enum(['activation', 'mailbox', 'breach', 'default']),
   agreementId: z.string().min(1),
-  provider: z.enum(['lambda', 'runpod', 'venice']).optional(),
+  provider: z.enum(['lambda', 'runpod', 'venice', 'bankr']).optional(),
   traceId: z.string().min(1).optional(),
   envelope: canonicalEnvelopeSchema.optional(),
   policy: z.record(z.unknown()).optional(),

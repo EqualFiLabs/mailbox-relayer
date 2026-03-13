@@ -32,7 +32,7 @@ describe('mailbox-relayer API', () => {
     });
 
     expect(providers.statusCode).toBe(200);
-    expect(providers.json().providers).toEqual(['lambda', 'runpod', 'venice']);
+    expect(providers.json().providers).toEqual(['lambda', 'runpod', 'venice', 'bankr']);
   });
 
   it('accepts canonical mailbox envelopes', async () => {
