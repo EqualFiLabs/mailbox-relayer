@@ -158,6 +158,32 @@ export class KillSwitchEnforcementService {
       status = result.status;
       terminated = result.terminated;
       message = result.message;
+
+      const disableProviderLink =
+        terminated &&
+        (input.provider === 'bankr' || this.readMetaBoolean(result.meta, ['providerAccessDisabled', 'disableProviderLink']));
+      if (disableProviderLink) {
+        this.store.clearProviderLink(input.agreementId);
+      }
+
+      const hardRevokeFollowUpRequired = this.readMetaBoolean(result.meta, ['hardRevokeFollowUpRequired']);
+      if (hardRevokeFollowUpRequired) {
+        await this.alerting?.emitAlert(
+          'termination_followup_required',
+          'warning',
+          'Provider termination requires hard revoke follow-up',
+          {
+            agreementId: input.agreementId,
+            provider: input.provider,
+            details: {
+              attempt: attemptNumber,
+              ...(providerResourceId ? { providerResourceId } : {}),
+              ...(message ? { message } : {}),
+              ...(result.meta ? { providerMeta: result.meta } : {}),
+            },
+          }
+        );
+      }
     }
 
     const shouldRetry = !terminated && attemptNumber < this.maxAttempts;
@@ -219,6 +245,19 @@ export class KillSwitchEnforcementService {
   private computeBackoffMs(attemptNumber: number): number {
     const raw = this.baseBackoffMs * 2 ** Math.max(0, attemptNumber - 1);
     return Math.min(raw, this.maxBackoffMs);
+  }
+
+  private readMetaBoolean(meta: Record<string, unknown> | undefined, keys: string[]): boolean {
+    if (!meta) return false;
+    for (const key of keys) {
+      const value = meta[key];
+      if (typeof value === 'boolean') return value;
+      if (typeof value === 'string') {
+        if (value.toLowerCase() === 'true') return true;
+        if (value.toLowerCase() === 'false') return false;
+      }
+    }
+    return false;
   }
 }
 
