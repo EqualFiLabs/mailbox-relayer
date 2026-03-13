@@ -9,6 +9,8 @@ Offchain mailbox relayer service for EqualFi.
 - `GET /messages/:id` - fetch message details
 - `POST /deliveries/:id/ack` - acknowledge delivery
 - `POST /demo/vertical-flow` - run mocked end-to-end flow (encrypt → queue → adapter execute → callback + ack)
+- `POST /events/onchain` - ingest on-chain lifecycle events (single event or batch)
+- `GET /agreements/:agreementId/state` - inspect relayer agreement state machine view
 
 ## Canonical envelope schema (v1)
 
@@ -79,6 +81,42 @@ Example request:
   "traceId": "trace-xyz"
 }
 ```
+
+## On-chain event ingestion worker (Phase 2)
+
+`POST /events/onchain` accepts either:
+
+```json
+{
+  "chainId": 84532,
+  "blockNumber": 123,
+  "logIndex": 1,
+  "eventType": "activation",
+  "agreementId": "agreement-123",
+  "provider": "venice"
+}
+```
+
+or batched:
+
+```json
+{
+  "events": [
+    { "chainId": 84532, "blockNumber": 123, "logIndex": 1, "eventType": "activation", "agreementId": "a-1", "provider": "venice" },
+    { "chainId": 84532, "blockNumber": 123, "logIndex": 2, "eventType": "mailbox", "agreementId": "a-1", "envelope": { "version": "equalfi.mailbox.ecies.eth-crypto.v1", "recipient": "agent:base:0xabc", "cipher": { "iv": "45ec7da7123f5562935ecd4cf0f3139e", "ephemPublicKey": "045ea7b6221a026bafa1adcf2c727d8ebaf5395b40a932bf85c1e991467113ba8867fbcca8e242864e0ea02342deb475e17f384095208dd7e34b1a9162ac647323", "ciphertext": "9971dc361b6cd776ffc3fdb0a7d74149", "mac": "0957308398294e8c9f03482c7c0ba49c9aa7d3252dabe4af8224279d9be220c1" }, "createdAt": "2026-03-10T20:00:00.000Z" } }
+  ]
+}
+```
+
+Supported `eventType` values:
+- `activation`
+- `mailbox`
+- `breach`
+- `default`
+
+Idempotency:
+- dedupe key is `chainId:blockNumber:logIndex`
+- processed keys persist when `RELAYER_DB_PATH` is set
 
 ## Development
 

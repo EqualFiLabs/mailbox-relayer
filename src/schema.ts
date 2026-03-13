@@ -44,3 +44,22 @@ export const demoVerticalFlowSchema = z.object({
   agreementId: z.string().min(1).optional(),
   traceId: z.string().min(1).optional(),
 });
+
+export const onchainEventSchema = z.object({
+  chainId: z.number().int().positive(),
+  blockNumber: z.number().int().nonnegative(),
+  logIndex: z.number().int().nonnegative(),
+  txHash: z.string().min(1).optional(),
+  eventType: z.enum(['activation', 'mailbox', 'breach', 'default']),
+  agreementId: z.string().min(1),
+  provider: z.enum(['lambda', 'runpod', 'venice']).optional(),
+  traceId: z.string().min(1).optional(),
+  envelope: canonicalEnvelopeSchema.optional(),
+  policy: z.record(z.unknown()).optional(),
+  payload: z.record(z.unknown()).optional(),
+  reason: z.string().min(1).optional(),
+});
+
+export const onchainEventBatchSchema = z.object({
+  events: z.array(onchainEventSchema).min(1),
+});
