@@ -4,6 +4,7 @@ import { onchainEventSchema } from './schema';
 import { AgreementStateRecord, MessageStore } from './store';
 import { StoredMessage } from './types';
 import { ComputeAdapterRegistry, ComputeProvider } from './providers';
+import { DeterministicMeteringWorker } from './metering';
 
 export type OnchainEvent = z.infer<typeof onchainEventSchema>;
 
@@ -22,7 +23,8 @@ export interface OnchainIngestionResult {
 export class OnchainEventIngestionWorker {
   constructor(
     private readonly store: MessageStore,
-    private readonly providers: ComputeAdapterRegistry
+    private readonly providers: ComputeAdapterRegistry,
+    private readonly meteringWorker?: DeterministicMeteringWorker
   ) {}
 
   async ingest(event: OnchainEvent): Promise<OnchainIngestionResult> {
@@ -200,6 +202,10 @@ export class OnchainEventIngestionWorker {
       };
     }
 
+    const finalMetering = this.meteringWorker
+      ? await this.meteringWorker.runForAgreement(event.agreementId, { finalPass: true })
+      : undefined;
+
     const providerResourceId = this.store.getProviderLink(event.agreementId)?.providerResourceId;
 
     const terminated = await adapter.terminate({
@@ -221,6 +227,16 @@ export class OnchainEventIngestionWorker {
       meta: {
         terminated: terminated.terminated,
         providerResultStatus: terminated.status,
+        ...(finalMetering
+          ? {
+              finalMetering: {
+                status: finalMetering.status,
+                usageRows: finalMetering.usageRows,
+                preparedItems: finalMetering.aggregatedItems.length,
+                ...(finalMetering.submissionId ? { submissionId: finalMetering.submissionId } : {}),
+              },
+            }
+          : {}),
       },
       ...(terminated.message ? { message: terminated.message } : {}),
     };

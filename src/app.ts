@@ -12,13 +12,16 @@ import { createDefaultStore, MessageStore } from './store';
 import { StoredMessage } from './types';
 import { ComputeAdapterRegistry, createDefaultComputeAdapterRegistry } from './providers';
 import { OnchainEventIngestionWorker } from './events';
+import { DeterministicMeteringWorker, MeteringScheduler } from './metering';
 
 export function buildApp(
   store: MessageStore = createDefaultStore(),
-  providerRegistry: ComputeAdapterRegistry = createDefaultComputeAdapterRegistry()
+  providerRegistry: ComputeAdapterRegistry = createDefaultComputeAdapterRegistry(),
+  meteringWorker: DeterministicMeteringWorker = new DeterministicMeteringWorker(store, providerRegistry),
+  meteringScheduler?: MeteringScheduler
 ) {
   const app = Fastify({ logger: true });
-  const onchainWorker = new OnchainEventIngestionWorker(store, providerRegistry);
+  const onchainWorker = new OnchainEventIngestionWorker(store, providerRegistry, meteringWorker);
 
   app.get('/health', async () => ({ ok: true }));
 
@@ -64,6 +67,48 @@ export function buildApp(
 
     return state;
   });
+
+  app.post('/metering/run', async (request, reply) => {
+    const body = (request.body ?? {}) as { agreementId?: string; finalPass?: boolean; to?: string };
+
+    if (body.to && Number.isNaN(Date.parse(body.to))) {
+      return reply.status(400).send({ error: 'invalid_to_timestamp' });
+    }
+
+    if (body.agreementId) {
+      const result = await meteringWorker.runForAgreement(body.agreementId, {
+        ...(body.finalPass !== undefined ? { finalPass: body.finalPass } : {}),
+        ...(body.to ? { to: body.to } : {}),
+      });
+
+      return reply.send({
+        agreementsScanned: 1,
+        preparedCount: result.status === 'prepared' ? 1 : 0,
+        results: [result],
+      });
+    }
+
+    const result = await meteringWorker.runOnce({
+      ...(body.finalPass !== undefined ? { finalPass: body.finalPass } : {}),
+      ...(body.to ? { to: body.to } : {}),
+    });
+
+    return reply.send(result);
+  });
+
+  app.get('/metering/submissions', async (request) => {
+    const query = request.query as { limit?: string };
+    const rawLimit = query?.limit ? Number(query.limit) : 20;
+    const limit = Number.isFinite(rawLimit) && rawLimit > 0 ? Math.min(Math.floor(rawLimit), 200) : 20;
+
+    return {
+      submissions: store.listUsageSubmissions(limit),
+    };
+  });
+
+  app.get('/metering/status', async () => ({
+    scheduler: meteringScheduler?.status() ?? { enabled: false, intervalMs: 0 },
+  }));
 
   app.post('/messages', async (request, reply) => {
     const parsed = canonicalEnvelopeSchema.safeParse(request.body);
