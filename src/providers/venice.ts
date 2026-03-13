@@ -114,8 +114,8 @@ export class VeniceComputeAdapter implements ComputeProviderAdapter {
     }
 
     const query = new URLSearchParams();
-    if (request.from) query.set('from', request.from);
-    if (request.to) query.set('to', request.to);
+    if (request.from) query.set('startDate', request.from);
+    if (request.to) query.set('endDate', request.to);
 
     const usageResp = await this.request<VeniceApiResponse<Record<string, unknown>>>(
       'GET',
@@ -194,8 +194,9 @@ export class VeniceComputeAdapter implements ComputeProviderAdapter {
     });
 
     const deleteAttempts = [
-      await this.request('DELETE', `/api_keys/${request.providerResourceId}`),
       await this.request('DELETE', `/api_keys?id=${encodeURIComponent(request.providerResourceId)}`),
+      // Fallback for potential future path-style variants.
+      await this.request('DELETE', `/api_keys/${request.providerResourceId}`),
     ];
 
     const deleteOk = deleteAttempts.some((result) => result.ok);
