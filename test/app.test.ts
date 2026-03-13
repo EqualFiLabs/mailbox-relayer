@@ -91,4 +91,27 @@ describe('mailbox-relayer API', () => {
     expect(acked.status).toBe('delivered');
     expect(acked.ack.provider).toBe('venice');
   });
+
+  it('runs mocked vertical flow end-to-end', async () => {
+    const run = await app.inject({
+      method: 'POST',
+      url: '/demo/vertical-flow',
+      payload: { provider: 'venice', agreementId: 'agreement-123', traceId: 'trace-xyz' },
+    });
+
+    expect(run.statusCode).toBe(200);
+    const result = run.json();
+    expect(result.agreementId).toBe('agreement-123');
+    expect(result.provider).toBe('venice');
+    expect(result.providerResultStatus).toBe('not_implemented');
+    expect(result.callbackRecorded).toBe(true);
+
+    const callbackMessage = await app.inject({
+      method: 'GET',
+      url: `/messages/${result.callbackMessageId}`,
+    });
+
+    expect(callbackMessage.statusCode).toBe(200);
+    expect(callbackMessage.json().status).toBe('delivered');
+  });
 });

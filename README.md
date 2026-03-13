@@ -8,6 +8,7 @@ Offchain mailbox relayer service for EqualFi.
 - `POST /messages` - enqueue a **canonical encrypted mailbox envelope**
 - `GET /messages/:id` - fetch message details
 - `POST /deliveries/:id/ack` - acknowledge delivery
+- `POST /demo/vertical-flow` - run mocked end-to-end flow (encrypt → queue → adapter execute → callback + ack)
 
 ## Canonical envelope schema (v1)
 
@@ -44,6 +45,26 @@ Scaffolded provider adapter contracts live in `src/providers/`:
 - `registry.ts` → no-lock-in adapter registry + default registration
 
 Current stubs return `status: "not_implemented"` and are intended for step-4 wiring.
+
+## Step 4 vertical demo flow
+
+`POST /demo/vertical-flow` executes a fully mocked slice:
+
+1. Borrower payload is encrypted using SDK-compatible ECIES helpers (`MailboxCompat`)
+2. Encrypted request is queued as canonical mailbox envelope
+3. Selected provider adapter stub executes (`lambda` / `runpod` / `venice`)
+4. Provider callback payload is encrypted and queued
+5. Callback delivery is acknowledged and persisted
+
+Example request:
+
+```json
+{
+  "provider": "venice",
+  "agreementId": "agreement-123",
+  "traceId": "trace-xyz"
+}
+```
 
 ## Development
 

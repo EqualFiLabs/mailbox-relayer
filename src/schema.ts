@@ -38,3 +38,9 @@ export const ackSchema = z.object({
   provider: z.string().min(1).optional(),
   meta: z.record(z.unknown()).optional(),
 });
+
+export const demoVerticalFlowSchema = z.object({
+  provider: z.enum(['lambda', 'runpod', 'venice']).default('venice'),
+  agreementId: z.string().min(1).optional(),
+  traceId: z.string().min(1).optional(),
+});
