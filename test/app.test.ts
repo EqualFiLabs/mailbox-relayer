@@ -25,6 +25,16 @@ describe('mailbox-relayer API', () => {
     await app.close();
   });
 
+  it('exposes scaffolded compute provider adapters', async () => {
+    const providers = await app.inject({
+      method: 'GET',
+      url: '/providers',
+    });
+
+    expect(providers.statusCode).toBe(200);
+    expect(providers.json().providers).toEqual(['lambda', 'runpod', 'venice']);
+  });
+
   it('accepts canonical mailbox envelopes', async () => {
     const create = await app.inject({
       method: 'POST',

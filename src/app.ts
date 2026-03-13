@@ -3,11 +3,17 @@ import { randomUUID } from 'node:crypto';
 import { canonicalEnvelopeSchema, ackSchema } from './schema';
 import { InMemoryMessageStore } from './store';
 import { StoredMessage } from './types';
+import { ComputeAdapterRegistry, createDefaultComputeAdapterRegistry } from './providers';
 
-export function buildApp(store = new InMemoryMessageStore()) {
+export function buildApp(
+  store = new InMemoryMessageStore(),
+  providerRegistry: ComputeAdapterRegistry = createDefaultComputeAdapterRegistry()
+) {
   const app = Fastify({ logger: true });
 
   app.get('/health', async () => ({ ok: true }));
+
+  app.get('/providers', async () => ({ providers: providerRegistry.list() }));
 
   app.post('/messages', async (request, reply) => {
     const parsed = canonicalEnvelopeSchema.safeParse(request.body);

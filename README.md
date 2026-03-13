@@ -4,6 +4,7 @@ Offchain mailbox relayer service for EqualFi.
 
 ## Endpoints
 
+- `GET /providers` - list scaffolded compute adapters
 - `POST /messages` - enqueue a **canonical encrypted mailbox envelope**
 - `GET /messages/:id` - fetch message details
 - `POST /deliveries/:id/ack` - acknowledge delivery
@@ -31,6 +32,18 @@ Offchain mailbox relayer service for EqualFi.
 Notes:
 - This matches the current `@equalfi/mailbox-sdk` envelope primitives (`iv`, `ephemPublicKey`, `ciphertext`, `mac`).
 - If mailbox contracts/events carry `bytes envelope`, decode bytes to UTF-8 envelope string in the edge service, then map into this canonical shape for relayer storage/indexing.
+
+## Compute provider adapter interface (step 3)
+
+Scaffolded provider adapter contracts live in `src/providers/`:
+
+- `types.ts` → `ComputeProviderAdapter` interface + request/result contracts
+- `lambda.ts` → `LambdaComputeAdapter` stub
+- `runpod.ts` → `RunPodComputeAdapter` stub
+- `venice.ts` → `VeniceComputeAdapter` stub
+- `registry.ts` → no-lock-in adapter registry + default registration
+
+Current stubs return `status: "not_implemented"` and are intended for step-4 wiring.
 
 ## Development
 
