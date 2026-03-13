@@ -19,7 +19,7 @@ afterEach(() => {
 });
 
 describe('SQLiteMessageStore', () => {
-  it('persists message, provider link, and usage checkpoint across restarts', () => {
+  it('persists message, provider link, usage checkpoint, and block cursor across restarts', () => {
     const dbPath = createDbPath();
 
     const storeA = new SQLiteMessageStore(dbPath);
@@ -54,16 +54,65 @@ describe('SQLiteMessageStore', () => {
       lastUsageDigest: 'digest-1',
       updatedAt: '2026-03-10T20:05:00.000Z',
     });
+    storeA.setBlockCursor(84532, 12345, '0xabc');
 
     const storeB = new SQLiteMessageStore(dbPath);
 
     const message = storeB.get('msg-1');
     const link = storeB.getProviderLink('agreement-1');
     const checkpoint = storeB.getUsageCheckpoint('agreement-1');
+    const cursor = storeB.getBlockCursor(84532);
 
     expect(message?.id).toBe('msg-1');
     expect(link?.providerResourceId).toBe('key_123');
     expect(checkpoint?.lastUsageDigest).toBe('digest-1');
+    expect(cursor).toEqual({ lastConfirmed: 12345, blockHash: '0xabc' });
+  });
+
+  it('stores provider events idempotently and supports observedAt filtering', () => {
+    const dbPath = createDbPath();
+    const store = new SQLiteMessageStore(dbPath);
+
+    const base = {
+      provider: 'bankr',
+      providerResourceId: 'resource-1',
+      payloadJson: '{"ok":true}',
+      createdAt: '2026-03-10T20:00:00.000Z',
+    };
+
+    const firstInsert = store.upsertProviderEvent({
+      ...base,
+      externalEventId: 'evt-1',
+      observedAt: '2026-03-10T20:00:01.000Z',
+    });
+    const duplicateInsert = store.upsertProviderEvent({
+      ...base,
+      externalEventId: 'evt-1',
+      observedAt: '2026-03-10T20:00:01.000Z',
+    });
+    const secondInsert = store.upsertProviderEvent({
+      ...base,
+      externalEventId: 'evt-2',
+      observedAt: '2026-03-10T20:05:00.000Z',
+    });
+
+    expect(firstInsert).toBe(true);
+    expect(duplicateInsert).toBe(false);
+    expect(secondInsert).toBe(true);
+
+    const all = store.listProviderEvents('bankr', 'resource-1');
+    const filtered = store.listProviderEvents(
+      'bankr',
+      'resource-1',
+      '2026-03-10T20:04:00.000Z',
+      '2026-03-10T20:06:00.000Z'
+    );
+
+    expect(all).toHaveLength(2);
+    expect(all[0].externalEventId).toBe('evt-1');
+    expect(all[1].externalEventId).toBe('evt-2');
+    expect(filtered).toHaveLength(1);
+    expect(filtered[0].externalEventId).toBe('evt-2');
   });
 
   it('enforces processed event idempotency', () => {

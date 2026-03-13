@@ -20,6 +20,20 @@ export interface UsageCheckpoint {
   updatedAt: string;
 }
 
+export interface BlockCursor {
+  lastConfirmed: number;
+  blockHash?: string;
+}
+
+export interface ProviderEventRecord {
+  provider: string;
+  providerResourceId: string;
+  externalEventId: string;
+  payloadJson: string;
+  observedAt: string;
+  createdAt: string;
+}
+
 export type AgreementState =
   | 'active'
   | 'activation_failed'
@@ -101,6 +115,16 @@ export interface MessageStore {
 
   setUsageCheckpoint(checkpoint: UsageCheckpoint): void;
   getUsageCheckpoint(agreementId: string): UsageCheckpoint | undefined;
+  setBlockCursor(chainId: number, lastConfirmed: number, blockHash?: string): void;
+  getBlockCursor(chainId: number): BlockCursor | undefined;
+  upsertProviderEvent(record: ProviderEventRecord): boolean;
+  listProviderEvents(
+    provider: string,
+    providerResourceId: string,
+    fromObservedAt?: string,
+    toObservedAt?: string,
+    limit?: number
+  ): ProviderEventRecord[];
 
   addUsageSubmission(record: UsageSubmissionRecord): void;
   getUsageSubmission(id: string): UsageSubmissionRecord | undefined;
@@ -132,6 +156,8 @@ export class InMemoryMessageStore implements MessageStore {
   private readonly messages = new Map<string, StoredMessage>();
   private readonly providerLinks = new Map<string, ProviderResourceLink>();
   private readonly usageCheckpoints = new Map<string, UsageCheckpoint>();
+  private readonly blockCursors = new Map<number, BlockCursor>();
+  private readonly providerEvents = new Map<string, ProviderEventRecord>();
   private readonly usageSubmissions: UsageSubmissionRecord[] = [];
   private readonly usageSettlementAttempts: UsageSettlementAttemptRecord[] = [];
   private readonly agreementStates = new Map<string, AgreementStateRecord>();
@@ -178,6 +204,48 @@ export class InMemoryMessageStore implements MessageStore {
 
   getUsageCheckpoint(agreementId: string): UsageCheckpoint | undefined {
     return this.usageCheckpoints.get(agreementId);
+  }
+
+  setBlockCursor(chainId: number, lastConfirmed: number, blockHash?: string): void {
+    this.blockCursors.set(chainId, {
+      lastConfirmed,
+      ...(blockHash ? { blockHash } : {}),
+    });
+  }
+
+  getBlockCursor(chainId: number): BlockCursor | undefined {
+    return this.blockCursors.get(chainId);
+  }
+
+  upsertProviderEvent(record: ProviderEventRecord): boolean {
+    const key = `${record.provider}\u0000${record.providerResourceId}\u0000${record.externalEventId}`;
+    if (this.providerEvents.has(key)) {
+      return false;
+    }
+    this.providerEvents.set(key, record);
+    return true;
+  }
+
+  listProviderEvents(
+    provider: string,
+    providerResourceId: string,
+    fromObservedAt?: string,
+    toObservedAt?: string,
+    limit = 200
+  ): ProviderEventRecord[] {
+    const from = fromObservedAt ?? '';
+    const to = toObservedAt ?? '9999-12-31T23:59:59.999Z';
+
+    return [...this.providerEvents.values()]
+      .filter(
+        (record) =>
+          record.provider === provider &&
+          record.providerResourceId === providerResourceId &&
+          record.observedAt >= from &&
+          record.observedAt <= to
+      )
+      .sort((a, b) => (a.observedAt === b.observedAt ? a.createdAt.localeCompare(b.createdAt) : a.observedAt.localeCompare(b.observedAt)))
+      .slice(0, limit);
   }
 
   addUsageSubmission(record: UsageSubmissionRecord): void {
@@ -316,7 +384,7 @@ export class InMemoryMessageStore implements MessageStore {
     return this.processedEvents.has(eventKey);
   }
 
-  markEventProcessed(eventKey: string): boolean {
+  markEventProcessed(eventKey: string, _blockNumber: number, _logIndex: number): boolean {
     if (this.processedEvents.has(eventKey)) return false;
     this.processedEvents.add(eventKey);
     return true;
@@ -354,6 +422,24 @@ export class SQLiteMessageStore implements MessageStore {
         last_usage_timestamp TEXT,
         last_usage_digest TEXT,
         updated_at TEXT NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS block_cursors (
+        chain_id INTEGER NOT NULL,
+        last_confirmed INTEGER NOT NULL,
+        block_hash TEXT,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY (chain_id)
+      );
+
+      CREATE TABLE IF NOT EXISTS provider_events (
+        provider TEXT NOT NULL,
+        provider_resource_id TEXT NOT NULL,
+        external_event_id TEXT NOT NULL,
+        payload_json TEXT NOT NULL,
+        observed_at TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        PRIMARY KEY (provider, provider_resource_id, external_event_id)
       );
 
       CREATE TABLE IF NOT EXISTS usage_submissions (
@@ -587,6 +673,96 @@ export class SQLiteMessageStore implements MessageStore {
       ...(row.last_usage_digest ? { lastUsageDigest: row.last_usage_digest } : {}),
       updatedAt: row.updated_at,
     };
+  }
+
+  setBlockCursor(chainId: number, lastConfirmed: number, blockHash?: string): void {
+    this.db
+      .prepare(
+        `INSERT INTO block_cursors (chain_id, last_confirmed, block_hash, updated_at)
+         VALUES (?, ?, ?, ?)
+         ON CONFLICT(chain_id) DO UPDATE SET
+           last_confirmed = excluded.last_confirmed,
+           block_hash = excluded.block_hash,
+           updated_at = excluded.updated_at`
+      )
+      .run(chainId, lastConfirmed, blockHash ?? null, new Date().toISOString());
+  }
+
+  getBlockCursor(chainId: number): BlockCursor | undefined {
+    const row = this.db
+      .prepare(
+        `SELECT last_confirmed, block_hash
+         FROM block_cursors WHERE chain_id = ?`
+      )
+      .get(chainId) as
+      | {
+          last_confirmed: number;
+          block_hash: string | null;
+        }
+      | undefined;
+
+    if (!row) return undefined;
+
+    return {
+      lastConfirmed: row.last_confirmed,
+      ...(row.block_hash ? { blockHash: row.block_hash } : {}),
+    };
+  }
+
+  upsertProviderEvent(record: ProviderEventRecord): boolean {
+    const result = this.db
+      .prepare(
+        `INSERT OR IGNORE INTO provider_events
+         (provider, provider_resource_id, external_event_id, payload_json, observed_at, created_at)
+         VALUES (?, ?, ?, ?, ?, ?)`
+      )
+      .run(
+        record.provider,
+        record.providerResourceId,
+        record.externalEventId,
+        record.payloadJson,
+        record.observedAt,
+        record.createdAt
+      );
+
+    return result.changes > 0;
+  }
+
+  listProviderEvents(
+    provider: string,
+    providerResourceId: string,
+    fromObservedAt?: string,
+    toObservedAt?: string,
+    limit = 200
+  ): ProviderEventRecord[] {
+    const rows = this.db
+      .prepare(
+        `SELECT provider, provider_resource_id, external_event_id, payload_json, observed_at, created_at
+         FROM provider_events
+         WHERE provider = ?
+           AND provider_resource_id = ?
+           AND observed_at >= COALESCE(?, observed_at)
+           AND observed_at <= COALESCE(?, observed_at)
+         ORDER BY observed_at ASC, created_at ASC
+         LIMIT ?`
+      )
+      .all(provider, providerResourceId, fromObservedAt ?? null, toObservedAt ?? null, limit) as Array<{
+      provider: string;
+      provider_resource_id: string;
+      external_event_id: string;
+      payload_json: string;
+      observed_at: string;
+      created_at: string;
+    }>;
+
+    return rows.map((row) => ({
+      provider: row.provider,
+      providerResourceId: row.provider_resource_id,
+      externalEventId: row.external_event_id,
+      payloadJson: row.payload_json,
+      observedAt: row.observed_at,
+      createdAt: row.created_at,
+    }));
   }
 
   addUsageSubmission(record: UsageSubmissionRecord): void {
