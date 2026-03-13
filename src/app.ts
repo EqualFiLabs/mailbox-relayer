@@ -1,4 +1,4 @@
-import Fastify from 'fastify';
+import Fastify, { FastifyReply, FastifyRequest } from 'fastify';
 import { randomUUID } from 'node:crypto';
 import { MailboxCompat } from './mailbox';
 import {
@@ -34,6 +34,32 @@ export function buildApp(
   usageSettlementScheduler?: UsageSettlementScheduler
 ) {
   const app = Fastify({ logger: true });
+
+  const requireAdminAuth = async (request: FastifyRequest, reply: FastifyReply) => {
+    const token = process.env.ADMIN_AUTH_TOKEN;
+    if (token) {
+      const auth = request.headers.authorization;
+      if (auth !== `Bearer ${token}`) {
+        return reply.status(401).send({ error: 'unauthorized' });
+      }
+    }
+  };
+
+  app.addHook('preHandler', async (request) => {
+    if (request.body && typeof request.body === 'object') {
+      const body = request.body as Record<string, unknown>;
+      const traceId = typeof body.traceId === 'string' ? body.traceId : undefined;
+      const agreementId = typeof body.agreementId === 'string' ? body.agreementId : undefined;
+
+      if (traceId || agreementId) {
+        request.log = request.log.child({
+          ...(traceId ? { traceId } : {}),
+          ...(agreementId ? { agreementId } : {}),
+        });
+      }
+    }
+  });
+
   const onchainWorker = new OnchainEventIngestionWorker(store, providerRegistry, meteringWorker, killSwitchService);
 
   app.get('/health', async () => ({ ok: true }));
@@ -92,7 +118,7 @@ export function buildApp(
     };
   });
 
-  app.post('/killswitch/retries/run', async (request) => {
+  app.post('/killswitch/retries/run', { preHandler: [requireAdminAuth] }, async (request) => {
     const body = (request.body ?? {}) as { limit?: number };
     const limit = body.limit && Number.isFinite(body.limit) ? Math.min(Math.max(1, body.limit), 200) : 20;
 
@@ -119,7 +145,7 @@ export function buildApp(
     };
   });
 
-  app.post('/metering/run', async (request, reply) => {
+  app.post('/metering/run', { preHandler: [requireAdminAuth] }, async (request, reply) => {
     const body = (request.body ?? {}) as { agreementId?: string; finalPass?: boolean; to?: string };
 
     if (body.to && Number.isNaN(Date.parse(body.to))) {
@@ -160,7 +186,7 @@ export function buildApp(
     };
   });
 
-  app.post('/settlement/run', async (request) => {
+  app.post('/settlement/run', { preHandler: [requireAdminAuth] }, async (request) => {
     const body = (request.body ?? {}) as { submissionId?: string; limitUnattempted?: number; limitRetries?: number };
 
     if (body.submissionId) {
