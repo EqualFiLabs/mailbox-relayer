@@ -97,6 +97,7 @@ export interface MessageStore {
   setProviderLink(link: ProviderResourceLink): void;
   getProviderLink(agreementId: string): ProviderResourceLink | undefined;
   listProviderLinks(): ProviderResourceLink[];
+  clearProviderLink(agreementId: string): void;
 
   setUsageCheckpoint(checkpoint: UsageCheckpoint): void;
   getUsageCheckpoint(agreementId: string): UsageCheckpoint | undefined;
@@ -165,6 +166,10 @@ export class InMemoryMessageStore implements MessageStore {
 
   listProviderLinks(): ProviderResourceLink[] {
     return [...this.providerLinks.values()].sort((a, b) => a.agreementId.localeCompare(b.agreementId));
+  }
+
+  clearProviderLink(agreementId: string): void {
+    this.providerLinks.delete(agreementId);
   }
 
   setUsageCheckpoint(checkpoint: UsageCheckpoint): void {
@@ -530,6 +535,10 @@ export class SQLiteMessageStore implements MessageStore {
       providerResourceId: row.provider_resource_id,
       updatedAt: row.updated_at,
     }));
+  }
+
+  clearProviderLink(agreementId: string): void {
+    this.db.prepare(`DELETE FROM provider_links WHERE agreement_id = ?`).run(agreementId);
   }
 
   setUsageCheckpoint(checkpoint: UsageCheckpoint): void {

@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { onchainEventSchema } from './schema';
-import { AgreementStateRecord, MessageStore } from './store';
+import { AgreementStateRecord, MessageStore, ProviderResourceLink } from './store';
 import { StoredMessage } from './types';
 import { ComputeAdapterRegistry, ComputeProvider } from './providers';
 import { DeterministicMeteringWorker } from './metering';
@@ -163,6 +163,27 @@ export class OnchainEventIngestionWorker {
     });
 
     if (provision.providerResourceId) {
+      const conflict = this.findProviderResourceConflict(event.agreementId, provider, provision.providerResourceId);
+      if (conflict) {
+        this.store.setAgreementState(this.toStateRecord(event.agreementId, 'activation_failed', event.traceId));
+
+        return {
+          accepted: true,
+          deduped: false,
+          eventKey,
+          eventType: event.eventType,
+          agreementId: event.agreementId,
+          provider,
+          action: 'activation_rejected_duplicate_provider_resource',
+          message: 'provider_resource_already_assigned',
+          meta: {
+            providerResultStatus: 'error',
+            providerResourceId: provision.providerResourceId,
+            conflictingAgreementId: conflict.agreementId,
+          },
+        };
+      }
+
       this.store.setProviderLink({
         agreementId: event.agreementId,
         provider,
@@ -317,5 +338,20 @@ export class OnchainEventIngestionWorker {
 
   private toEventKey(event: OnchainEvent): string {
     return `${event.chainId}:${event.blockNumber}:${event.logIndex}`;
+  }
+
+  private findProviderResourceConflict(
+    agreementId: string,
+    provider: ComputeProvider,
+    providerResourceId: string
+  ): ProviderResourceLink | undefined {
+    return this.store
+      .listProviderLinks()
+      .find(
+        (link) =>
+          link.provider === provider &&
+          link.providerResourceId === providerResourceId &&
+          link.agreementId !== agreementId
+      );
   }
 }
