@@ -59,6 +59,7 @@ Scaffolded provider adapter contracts live in `src/providers/`:
 
 Current status:
 - `venice` adapter has a live HTTP implementation scaffold (key create, paginated usage read, revoke flow)
+- `bankr` adapter is implemented (provisioning, usage normalization, soft-kill terminate path)
 - Venice metering fails closed: unmappable/invalid usage rows are quarantined and surfaced as errors
 - `lambda` and `runpod` remain stubbed
 
@@ -66,6 +67,14 @@ Environment variables:
 
 - `VENICE_API_KEY` (required for live Venice operations)
 - `VENICE_BASE_URL` (optional, default `https://api.venice.ai/api/v1`)
+- `BANKR_LLM_KEY` (optional fallback Bankr key; required when no key-pool source is configured)
+- `BANKR_LLM_BASE_URL` (optional, default `https://llm.bankr.bot`)
+- `BANKR_USAGE_PATH` (optional, default `/usage`)
+- `BANKR_USAGE_MAX_PAGES` (optional, default `50`)
+- `BANKR_KEY_POOL_JSON` (optional JSON array key source, e.g. `[{"id":"pool-1","apiKey":"..."}]`)
+- `BANKR_KEY_POOL_PATH` (optional filesystem path to key-pool JSON)
+- `BANKR_KEY_POOL_ENV_PREFIX` (optional env prefix for key-pool discovery, default `BANKR_KEY_POOL_KEY_`)
+- `BANKR_KEY_POOL_STRICT` (optional, default `true`; enforce one key fingerprint per active agreement)
 - `RELAYER_DB_PATH` (optional; when set, enables durable SQLite state store)
 - `METERING_ENABLED` (`true`/`false`, default `false`)
 - `METERING_INTERVAL_MS` (default `30000`)
@@ -79,6 +88,21 @@ Environment variables:
   - `/events/onchain` is strict: it always requires Bearer auth and returns `503` if `ADMIN_AUTH_TOKEN` is unset
 - `ALERT_WEBHOOK_URL` (optional; when set, enables webhook alerts for failures)
 - `ALERT_WEBHOOK_TOKEN` (optional; bearer token for alert webhook)
+
+### Bankr v1.5 soft-kill behavior
+
+- Activation routing uses canonical on-chain provider (`event.provider`) and rejects off-chain provider overrides on mismatch.
+- Bankr provisioning enforces one credential assignment per active agreement.
+- Bankr usage is normalized into canonical provider-prefixed unit types: `BANKR_TEXT_TOKEN_IN` and `BANKR_TEXT_TOKEN_OUT`.
+- Kill-switch terminate path for Bankr is soft in v1.5:
+  - relayer disables the agreement provider link,
+  - subsequent metering skips due to missing provider link,
+  - `termination_followup_required` alert is emitted for operator follow-up.
+
+### Hard Revoke Backlog (Post-v1 TODO)
+
+- TODO: Add upstream Bankr hard revoke execution path and verification checks (beyond relayer-local disable).
+- TODO: Persist hard-revoke lifecycle state (`pending|confirmed|failed`) per terminated Bankr agreement and expose it in operator APIs/runbooks.
 
 Durable SQLite state includes:
 - mailbox messages
@@ -121,7 +145,7 @@ Payload format:
 
 1. Borrower payload is encrypted using SDK-compatible ECIES helpers (`MailboxCompat`)
 2. Encrypted request is queued as canonical mailbox envelope
-3. Selected provider adapter stub executes (`lambda` / `runpod` / `venice`)
+3. Selected provider adapter executes (`lambda` / `runpod` / `venice` / `bankr`)
 4. Provider callback payload is encrypted and queued
 5. Callback delivery is acknowledged and persisted
 
