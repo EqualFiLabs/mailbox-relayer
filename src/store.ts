@@ -2,6 +2,7 @@ import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import Database from 'better-sqlite3';
 import { ComputeProvider } from './providers/types';
+import { AdapterResultStatus } from './providers';
 import { StoredMessage } from './types';
 
 export interface ProviderResourceLink {
@@ -48,6 +49,32 @@ export interface UsageSubmissionRecord {
   from?: string;
 }
 
+export interface KillSwitchRecord {
+  agreementId: string;
+  active: boolean;
+  reason: string;
+  triggeredBy: 'breach' | 'default' | 'manual' | 'retry';
+  activatedAt: string;
+  updatedAt: string;
+  provider?: ComputeProvider;
+  sourceEventKey?: string;
+  lastTerminationStatus?: AdapterResultStatus;
+}
+
+export interface TerminationAttemptRecord {
+  id: string;
+  agreementId: string;
+  provider: ComputeProvider;
+  attempt: number;
+  status: AdapterResultStatus;
+  terminated: boolean;
+  reason: string;
+  at: string;
+  providerResourceId?: string;
+  message?: string;
+  nextRetryAt?: string;
+}
+
 export interface MessageStore {
   save(message: StoredMessage): StoredMessage;
   get(id: string): StoredMessage | undefined;
@@ -66,6 +93,15 @@ export interface MessageStore {
   setAgreementState(record: AgreementStateRecord): void;
   getAgreementState(agreementId: string): AgreementStateRecord | undefined;
 
+  setKillSwitch(record: KillSwitchRecord): void;
+  getKillSwitch(agreementId: string): KillSwitchRecord | undefined;
+  listActiveKillSwitches(limit?: number): KillSwitchRecord[];
+
+  addTerminationAttempt(record: TerminationAttemptRecord): void;
+  getLatestTerminationAttempt(agreementId: string): TerminationAttemptRecord | undefined;
+  listTerminationAttempts(agreementId?: string, limit?: number): TerminationAttemptRecord[];
+  listDueTerminationRetries(nowIso: string, limit?: number): TerminationAttemptRecord[];
+
   markEventProcessed(eventKey: string, blockNumber: number, logIndex: number): boolean;
 }
 
@@ -75,6 +111,8 @@ export class InMemoryMessageStore implements MessageStore {
   private readonly usageCheckpoints = new Map<string, UsageCheckpoint>();
   private readonly usageSubmissions: UsageSubmissionRecord[] = [];
   private readonly agreementStates = new Map<string, AgreementStateRecord>();
+  private readonly killSwitches = new Map<string, KillSwitchRecord>();
+  private readonly terminationAttempts: TerminationAttemptRecord[] = [];
   private readonly processedEvents = new Set<string>();
 
   save(message: StoredMessage): StoredMessage {
@@ -130,6 +168,64 @@ export class InMemoryMessageStore implements MessageStore {
     return this.agreementStates.get(agreementId);
   }
 
+  setKillSwitch(record: KillSwitchRecord): void {
+    this.killSwitches.set(record.agreementId, record);
+  }
+
+  getKillSwitch(agreementId: string): KillSwitchRecord | undefined {
+    return this.killSwitches.get(agreementId);
+  }
+
+  listActiveKillSwitches(limit = 50): KillSwitchRecord[] {
+    return [...this.killSwitches.values()]
+      .filter((ks) => ks.active)
+      .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
+      .slice(0, limit);
+  }
+
+  addTerminationAttempt(record: TerminationAttemptRecord): void {
+    this.terminationAttempts.push(record);
+  }
+
+  getLatestTerminationAttempt(agreementId: string): TerminationAttemptRecord | undefined {
+    return this.terminationAttempts
+      .filter((r) => r.agreementId === agreementId)
+      .sort((a, b) => b.at.localeCompare(a.at))[0];
+  }
+
+  listTerminationAttempts(agreementId?: string, limit = 50): TerminationAttemptRecord[] {
+    const filtered = agreementId
+      ? this.terminationAttempts.filter((r) => r.agreementId === agreementId)
+      : this.terminationAttempts;
+
+    return [...filtered].sort((a, b) => b.at.localeCompare(a.at)).slice(0, limit);
+  }
+
+  listDueTerminationRetries(nowIso: string, limit = 20): TerminationAttemptRecord[] {
+    const now = Date.parse(nowIso);
+    if (Number.isNaN(now)) return [];
+
+    const latestByAgreement = new Map<string, TerminationAttemptRecord>();
+
+    for (const attempt of this.terminationAttempts) {
+      const existing = latestByAgreement.get(attempt.agreementId);
+      if (!existing || attempt.at > existing.at) {
+        latestByAgreement.set(attempt.agreementId, attempt);
+      }
+    }
+
+    return [...latestByAgreement.values()]
+      .filter((attempt) => {
+        if (attempt.terminated) return false;
+        if (!attempt.nextRetryAt) return false;
+        if (Date.parse(attempt.nextRetryAt) > now) return false;
+        const ks = this.killSwitches.get(attempt.agreementId);
+        return Boolean(ks?.active);
+      })
+      .sort((a, b) => (a.nextRetryAt ?? '').localeCompare(b.nextRetryAt ?? ''))
+      .slice(0, limit);
+  }
+
   markEventProcessed(eventKey: string): boolean {
     if (this.processedEvents.has(eventKey)) return false;
     this.processedEvents.add(eventKey);
@@ -170,13 +266,6 @@ export class SQLiteMessageStore implements MessageStore {
         updated_at TEXT NOT NULL
       );
 
-      CREATE TABLE IF NOT EXISTS agreement_states (
-        agreement_id TEXT PRIMARY KEY,
-        state TEXT NOT NULL,
-        trace_id TEXT,
-        updated_at TEXT NOT NULL
-      );
-
       CREATE TABLE IF NOT EXISTS usage_submissions (
         id TEXT PRIMARY KEY,
         agreement_id TEXT NOT NULL,
@@ -187,6 +276,39 @@ export class SQLiteMessageStore implements MessageStore {
         items_json TEXT NOT NULL,
         final_pass INTEGER NOT NULL,
         created_at TEXT NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS agreement_states (
+        agreement_id TEXT PRIMARY KEY,
+        state TEXT NOT NULL,
+        trace_id TEXT,
+        updated_at TEXT NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS kill_switches (
+        agreement_id TEXT PRIMARY KEY,
+        active INTEGER NOT NULL,
+        reason TEXT NOT NULL,
+        triggered_by TEXT NOT NULL,
+        provider TEXT,
+        source_event_key TEXT,
+        last_termination_status TEXT,
+        activated_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS termination_attempts (
+        id TEXT PRIMARY KEY,
+        agreement_id TEXT NOT NULL,
+        provider TEXT NOT NULL,
+        provider_resource_id TEXT,
+        attempt INTEGER NOT NULL,
+        status TEXT NOT NULL,
+        terminated INTEGER NOT NULL,
+        reason TEXT NOT NULL,
+        message TEXT,
+        next_retry_at TEXT,
+        at TEXT NOT NULL
       );
 
       CREATE TABLE IF NOT EXISTS processed_events (
@@ -450,6 +572,235 @@ export class SQLiteMessageStore implements MessageStore {
     };
   }
 
+  setKillSwitch(record: KillSwitchRecord): void {
+    this.db
+      .prepare(
+        `INSERT INTO kill_switches
+         (agreement_id, active, reason, triggered_by, provider, source_event_key, last_termination_status, activated_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(agreement_id) DO UPDATE SET
+           active = excluded.active,
+           reason = excluded.reason,
+           triggered_by = excluded.triggered_by,
+           provider = excluded.provider,
+           source_event_key = excluded.source_event_key,
+           last_termination_status = excluded.last_termination_status,
+           activated_at = excluded.activated_at,
+           updated_at = excluded.updated_at`
+      )
+      .run(
+        record.agreementId,
+        record.active ? 1 : 0,
+        record.reason,
+        record.triggeredBy,
+        record.provider ?? null,
+        record.sourceEventKey ?? null,
+        record.lastTerminationStatus ?? null,
+        record.activatedAt,
+        record.updatedAt
+      );
+  }
+
+  getKillSwitch(agreementId: string): KillSwitchRecord | undefined {
+    const row = this.db
+      .prepare(
+        `SELECT agreement_id, active, reason, triggered_by, provider, source_event_key, last_termination_status, activated_at, updated_at
+         FROM kill_switches WHERE agreement_id = ?`
+      )
+      .get(agreementId) as
+      | {
+          agreement_id: string;
+          active: number;
+          reason: string;
+          triggered_by: KillSwitchRecord['triggeredBy'];
+          provider: ComputeProvider | null;
+          source_event_key: string | null;
+          last_termination_status: AdapterResultStatus | null;
+          activated_at: string;
+          updated_at: string;
+        }
+      | undefined;
+
+    if (!row) return undefined;
+
+    return {
+      agreementId: row.agreement_id,
+      active: Boolean(row.active),
+      reason: row.reason,
+      triggeredBy: row.triggered_by,
+      ...(row.provider ? { provider: row.provider } : {}),
+      ...(row.source_event_key ? { sourceEventKey: row.source_event_key } : {}),
+      ...(row.last_termination_status ? { lastTerminationStatus: row.last_termination_status } : {}),
+      activatedAt: row.activated_at,
+      updatedAt: row.updated_at,
+    };
+  }
+
+  listActiveKillSwitches(limit = 50): KillSwitchRecord[] {
+    const rows = this.db
+      .prepare(
+        `SELECT agreement_id, active, reason, triggered_by, provider, source_event_key, last_termination_status, activated_at, updated_at
+         FROM kill_switches
+         WHERE active = 1
+         ORDER BY updated_at DESC
+         LIMIT ?`
+      )
+      .all(limit) as Array<{
+      agreement_id: string;
+      active: number;
+      reason: string;
+      triggered_by: KillSwitchRecord['triggeredBy'];
+      provider: ComputeProvider | null;
+      source_event_key: string | null;
+      last_termination_status: AdapterResultStatus | null;
+      activated_at: string;
+      updated_at: string;
+    }>;
+
+    return rows.map((row) => ({
+      agreementId: row.agreement_id,
+      active: Boolean(row.active),
+      reason: row.reason,
+      triggeredBy: row.triggered_by,
+      ...(row.provider ? { provider: row.provider } : {}),
+      ...(row.source_event_key ? { sourceEventKey: row.source_event_key } : {}),
+      ...(row.last_termination_status ? { lastTerminationStatus: row.last_termination_status } : {}),
+      activatedAt: row.activated_at,
+      updatedAt: row.updated_at,
+    }));
+  }
+
+  addTerminationAttempt(record: TerminationAttemptRecord): void {
+    this.db
+      .prepare(
+        `INSERT INTO termination_attempts
+         (id, agreement_id, provider, provider_resource_id, attempt, status, terminated, reason, message, next_retry_at, at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      )
+      .run(
+        record.id,
+        record.agreementId,
+        record.provider,
+        record.providerResourceId ?? null,
+        record.attempt,
+        record.status,
+        record.terminated ? 1 : 0,
+        record.reason,
+        record.message ?? null,
+        record.nextRetryAt ?? null,
+        record.at
+      );
+  }
+
+  getLatestTerminationAttempt(agreementId: string): TerminationAttemptRecord | undefined {
+    const row = this.db
+      .prepare(
+        `SELECT id, agreement_id, provider, provider_resource_id, attempt, status, terminated, reason, message, next_retry_at, at
+         FROM termination_attempts
+         WHERE agreement_id = ?
+         ORDER BY at DESC, attempt DESC
+         LIMIT 1`
+      )
+      .get(agreementId) as
+      | {
+          id: string;
+          agreement_id: string;
+          provider: ComputeProvider;
+          provider_resource_id: string | null;
+          attempt: number;
+          status: AdapterResultStatus;
+          terminated: number;
+          reason: string;
+          message: string | null;
+          next_retry_at: string | null;
+          at: string;
+        }
+      | undefined;
+
+    return row ? rowToTerminationAttempt(row) : undefined;
+  }
+
+  listTerminationAttempts(agreementId?: string, limit = 50): TerminationAttemptRecord[] {
+    const rows = agreementId
+      ? (this.db
+          .prepare(
+            `SELECT id, agreement_id, provider, provider_resource_id, attempt, status, terminated, reason, message, next_retry_at, at
+             FROM termination_attempts
+             WHERE agreement_id = ?
+             ORDER BY at DESC, attempt DESC
+             LIMIT ?`
+          )
+          .all(agreementId, limit) as Array<{
+          id: string;
+          agreement_id: string;
+          provider: ComputeProvider;
+          provider_resource_id: string | null;
+          attempt: number;
+          status: AdapterResultStatus;
+          terminated: number;
+          reason: string;
+          message: string | null;
+          next_retry_at: string | null;
+          at: string;
+        }>)
+      : (this.db
+          .prepare(
+            `SELECT id, agreement_id, provider, provider_resource_id, attempt, status, terminated, reason, message, next_retry_at, at
+             FROM termination_attempts
+             ORDER BY at DESC, attempt DESC
+             LIMIT ?`
+          )
+          .all(limit) as Array<{
+          id: string;
+          agreement_id: string;
+          provider: ComputeProvider;
+          provider_resource_id: string | null;
+          attempt: number;
+          status: AdapterResultStatus;
+          terminated: number;
+          reason: string;
+          message: string | null;
+          next_retry_at: string | null;
+          at: string;
+        }>);
+
+    return rows.map(rowToTerminationAttempt);
+  }
+
+  listDueTerminationRetries(nowIso: string, limit = 20): TerminationAttemptRecord[] {
+    const rows = this.db
+      .prepare(
+        `SELECT t.id, t.agreement_id, t.provider, t.provider_resource_id, t.attempt, t.status, t.terminated, t.reason, t.message, t.next_retry_at, t.at
+         FROM termination_attempts t
+         INNER JOIN (
+           SELECT agreement_id, MAX(attempt) AS max_attempt
+           FROM termination_attempts
+           GROUP BY agreement_id
+         ) latest ON latest.agreement_id = t.agreement_id AND latest.max_attempt = t.attempt
+         INNER JOIN kill_switches ks ON ks.agreement_id = t.agreement_id AND ks.active = 1
+         WHERE t.terminated = 0
+           AND t.next_retry_at IS NOT NULL
+           AND t.next_retry_at <= ?
+         ORDER BY t.next_retry_at ASC
+         LIMIT ?`
+      )
+      .all(nowIso, limit) as Array<{
+      id: string;
+      agreement_id: string;
+      provider: ComputeProvider;
+      provider_resource_id: string | null;
+      attempt: number;
+      status: AdapterResultStatus;
+      terminated: number;
+      reason: string;
+      message: string | null;
+      next_retry_at: string | null;
+      at: string;
+    }>;
+
+    return rows.map(rowToTerminationAttempt);
+  }
+
   markEventProcessed(eventKey: string, blockNumber: number, logIndex: number): boolean {
     try {
       this.db
@@ -463,6 +814,34 @@ export class SQLiteMessageStore implements MessageStore {
       return false;
     }
   }
+}
+
+function rowToTerminationAttempt(row: {
+  id: string;
+  agreement_id: string;
+  provider: ComputeProvider;
+  provider_resource_id: string | null;
+  attempt: number;
+  status: AdapterResultStatus;
+  terminated: number;
+  reason: string;
+  message: string | null;
+  next_retry_at: string | null;
+  at: string;
+}): TerminationAttemptRecord {
+  return {
+    id: row.id,
+    agreementId: row.agreement_id,
+    provider: row.provider,
+    ...(row.provider_resource_id ? { providerResourceId: row.provider_resource_id } : {}),
+    attempt: row.attempt,
+    status: row.status,
+    terminated: Boolean(row.terminated),
+    reason: row.reason,
+    ...(row.message ? { message: row.message } : {}),
+    ...(row.next_retry_at ? { nextRetryAt: row.next_retry_at } : {}),
+    at: row.at,
+  };
 }
 
 export function createDefaultStore(): MessageStore {

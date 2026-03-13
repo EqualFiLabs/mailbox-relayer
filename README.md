@@ -13,7 +13,11 @@ Offchain mailbox relayer service for EqualFi.
 - `GET /agreements/:agreementId/state` - inspect relayer agreement state machine view
 - `POST /metering/run` - execute deterministic metering poll once (all agreements or one)
 - `GET /metering/submissions` - inspect prepared batched registerUsage submissions
-- `GET /metering/status` - scheduler status
+- `GET /metering/status` - metering + kill-switch retry scheduler status
+- `GET /agreements/:agreementId/draw-eligibility` - check whether draw path is frozen
+- `POST /killswitch/retries/run` - process due termination retries (with backoff)
+- `GET /killswitch/active` - list active kill-switches
+- `GET /killswitch/attempts` - inspect termination attempts/history
 
 ## Canonical envelope schema (v1)
 
@@ -60,12 +64,16 @@ Environment variables:
 - `RELAYER_DB_PATH` (optional; when set, enables durable SQLite state store)
 - `METERING_ENABLED` (`true`/`false`, default `false`)
 - `METERING_INTERVAL_MS` (default `30000`)
+- `KILLSWITCH_RETRY_ENABLED` (`true`/`false`, default `false`)
+- `KILLSWITCH_RETRY_INTERVAL_MS` (default `30000`)
 
 Durable SQLite state includes:
 - mailbox messages
 - provider resource links (`agreementId -> providerResourceId`)
 - usage checkpoints
 - prepared usage submission batches (`registerUsage` payload staging)
+- active kill-switch state
+- termination attempt history + retry metadata (backoff scheduling)
 - processed event keys (idempotency)
 
 ## Step 4 vertical demo flow
@@ -132,6 +140,7 @@ Idempotency:
 - Stage batched registerUsage payloads in durable store (`usage_submissions`)
 - Update usage checkpoints after each successful polling window
 - On breach/default events, perform a **final metering pass** before key termination attempt
+- Breach/default events activate a kill-switch (draw frozen) and record termination attempts with retry backoff
 
 Run once manually:
 

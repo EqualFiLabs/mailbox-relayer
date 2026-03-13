@@ -5,6 +5,7 @@ import { AgreementStateRecord, MessageStore } from './store';
 import { StoredMessage } from './types';
 import { ComputeAdapterRegistry, ComputeProvider } from './providers';
 import { DeterministicMeteringWorker } from './metering';
+import { KillSwitchEnforcementService } from './killswitch';
 
 export type OnchainEvent = z.infer<typeof onchainEventSchema>;
 
@@ -24,7 +25,8 @@ export class OnchainEventIngestionWorker {
   constructor(
     private readonly store: MessageStore,
     private readonly providers: ComputeAdapterRegistry,
-    private readonly meteringWorker?: DeterministicMeteringWorker
+    private readonly meteringWorker?: DeterministicMeteringWorker,
+    private readonly killSwitchService?: KillSwitchEnforcementService
   ) {}
 
   async ingest(event: OnchainEvent): Promise<OnchainIngestionResult> {
@@ -175,8 +177,20 @@ export class OnchainEventIngestionWorker {
     const provider = event.provider ?? this.store.getProviderLink(event.agreementId)?.provider;
     const state = event.eventType === 'breach' ? 'breach_detected' : 'default_detected';
 
-    if (!provider) {
-      this.store.setAgreementState(this.toStateRecord(event.agreementId, state, event.traceId));
+    const finalMetering = this.meteringWorker
+      ? await this.meteringWorker.runForAgreement(event.agreementId, { finalPass: true })
+      : undefined;
+
+    this.store.setAgreementState(this.toStateRecord(event.agreementId, state, event.traceId));
+
+    if (this.killSwitchService) {
+      const ks = await this.killSwitchService.enforce({
+        agreementId: event.agreementId,
+        eventType: event.eventType as 'breach' | 'default',
+        ...(event.reason ? { reason: event.reason } : {}),
+        ...(provider ? { provider } : {}),
+        sourceEventKey: eventKey,
+      });
 
       return {
         accepted: true,
@@ -184,7 +198,42 @@ export class OnchainEventIngestionWorker {
         eventKey,
         eventType: event.eventType,
         agreementId: event.agreementId,
-        action: 'state_updated_no_provider',
+        ...(provider ? { provider } : {}),
+        action: ks.action === 'termination_attempted' ? 'termination_attempted' : 'kill_switch_frozen',
+        meta: {
+          drawFrozen: ks.drawFrozen,
+          ...(ks.attempt
+            ? {
+                terminationAttempt: {
+                  attempt: ks.attempt.attempt,
+                  status: ks.attempt.status,
+                  terminated: ks.attempt.terminated,
+                  ...(ks.attempt.nextRetryAt ? { nextRetryAt: ks.attempt.nextRetryAt } : {}),
+                },
+              }
+            : {}),
+          ...(finalMetering
+            ? {
+                finalMetering: {
+                  status: finalMetering.status,
+                  usageRows: finalMetering.usageRows,
+                  preparedItems: finalMetering.aggregatedItems.length,
+                  ...(finalMetering.submissionId ? { submissionId: finalMetering.submissionId } : {}),
+                },
+              }
+            : {}),
+        },
+      };
+    }
+
+    if (!provider) {
+      return {
+        accepted: true,
+        deduped: false,
+        eventKey,
+        eventType: event.eventType,
+        agreementId: event.agreementId,
+        action: 'kill_switch_frozen',
       };
     }
 
@@ -202,10 +251,6 @@ export class OnchainEventIngestionWorker {
       };
     }
 
-    const finalMetering = this.meteringWorker
-      ? await this.meteringWorker.runForAgreement(event.agreementId, { finalPass: true })
-      : undefined;
-
     const providerResourceId = this.store.getProviderLink(event.agreementId)?.providerResourceId;
 
     const terminated = await adapter.terminate({
@@ -213,8 +258,6 @@ export class OnchainEventIngestionWorker {
       ...(providerResourceId ? { providerResourceId } : {}),
       reason: event.reason ?? event.eventType,
     });
-
-    this.store.setAgreementState(this.toStateRecord(event.agreementId, state, event.traceId));
 
     return {
       accepted: true,
