@@ -1,6 +1,7 @@
 import { LambdaComputeAdapter } from './lambda';
 import { RunPodComputeAdapter } from './runpod';
 import { VeniceComputeAdapter } from './venice';
+import { BankrComputeAdapter } from './bankr';
 import { ComputeProvider, ComputeProviderAdapter } from './types';
 
 export class ComputeAdapterRegistry {
@@ -24,5 +25,6 @@ export function createDefaultComputeAdapterRegistry(): ComputeAdapterRegistry {
   registry.register(new LambdaComputeAdapter());
   registry.register(new RunPodComputeAdapter());
   registry.register(new VeniceComputeAdapter());
+  registry.register(new BankrComputeAdapter());
   return registry;
 }

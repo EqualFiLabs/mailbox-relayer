@@ -1,4 +1,4 @@
-export type ComputeProvider = 'lambda' | 'runpod' | 'venice';
+export type ComputeProvider = 'lambda' | 'runpod' | 'venice' | 'bankr';
 
 export type AdapterResultStatus = 'ok' | 'not_implemented' | 'error';
 
