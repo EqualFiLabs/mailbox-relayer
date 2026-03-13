@@ -18,13 +18,15 @@
     "node": ">=20"
   },
   "dependencies": {
+    "better-sqlite3": "^11.8.1",
     "eth-crypto": "^2.6.0",
     "fastify": "^4.28.1",
     "uuid": "^11.1.0",
     "zod": "^3.24.2"
   },
   "devDependencies": {
-    "@types/node": "^20.17.24",
+    "@types/better-sqlite3": "^7.6.12",
+    "@types/node": "^22.13.10",
     "tsup": "^8.5.1",
     "tsx": "^4.19.3",
     "typescript": "^5.8.2",

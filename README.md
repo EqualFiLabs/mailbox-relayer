@@ -52,6 +52,13 @@ Environment variables:
 
 - `VENICE_API_KEY` (required for live Venice operations)
 - `VENICE_BASE_URL` (optional, default `https://api.venice.ai/api/v1`)
+- `RELAYER_DB_PATH` (optional; when set, enables durable SQLite state store)
+
+Durable SQLite state includes:
+- mailbox messages
+- provider resource links (`agreementId -> providerResourceId`)
+- usage checkpoints
+- processed event keys (idempotency)
 
 ## Step 4 vertical demo flow
 
