@@ -64,6 +64,26 @@ export function buildApp(
 
   app.get('/health', async () => ({ ok: true }));
 
+  app.get('/health/ready', async () => {
+    const metering = meteringScheduler?.status() ?? { enabled: false, intervalMs: 0 };
+    const killSwitchRetry = killSwitchRetryScheduler?.status() ?? { enabled: false, intervalMs: 0 };
+    const usageSettlement = usageSettlementScheduler?.status() ?? { enabled: false, intervalMs: 0 };
+
+    const allSchedulersReady =
+      (!metering.enabled || metering.running === true) &&
+      (!killSwitchRetry.enabled || killSwitchRetry.running === true) &&
+      (!usageSettlement.enabled || usageSettlement.running === true);
+
+    return {
+      ready: allSchedulersReady,
+      schedulers: {
+        metering,
+        killSwitchRetry,
+        usageSettlement,
+      },
+    };
+  });
+
   app.get('/providers', async () => ({ providers: providerRegistry.list() }));
 
   app.post('/events/onchain', async (request, reply) => {

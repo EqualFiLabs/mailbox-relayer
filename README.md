@@ -4,6 +4,8 @@ Offchain mailbox relayer service for EqualFi.
 
 ## Endpoints
 
+- `GET /health` - basic liveness check
+- `GET /health/ready` - scheduler readiness check (returns `ready: true` when all enabled schedulers are running)
 - `GET /providers` - list scaffolded compute adapters
 - `POST /messages` - enqueue a **canonical encrypted mailbox envelope**
 - `GET /messages/:id` - fetch message details
