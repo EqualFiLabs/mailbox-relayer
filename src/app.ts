@@ -14,6 +14,11 @@ import { ComputeAdapterRegistry, createDefaultComputeAdapterRegistry } from './p
 import { OnchainEventIngestionWorker } from './events';
 import { DeterministicMeteringWorker, MeteringScheduler } from './metering';
 import { KillSwitchEnforcementService, KillSwitchRetryScheduler } from './killswitch';
+import {
+  DisabledUsageSettlementSender,
+  UsageSettlementScheduler,
+  UsageSettlementService,
+} from './settlement';
 
 export function buildApp(
   store: MessageStore = createDefaultStore(),
@@ -21,7 +26,12 @@ export function buildApp(
   meteringWorker: DeterministicMeteringWorker = new DeterministicMeteringWorker(store, providerRegistry),
   meteringScheduler?: MeteringScheduler,
   killSwitchService: KillSwitchEnforcementService = new KillSwitchEnforcementService(store, providerRegistry),
-  killSwitchRetryScheduler?: KillSwitchRetryScheduler
+  killSwitchRetryScheduler?: KillSwitchRetryScheduler,
+  usageSettlementService: UsageSettlementService = new UsageSettlementService(
+    store,
+    new DisabledUsageSettlementSender()
+  ),
+  usageSettlementScheduler?: UsageSettlementScheduler
 ) {
   const app = Fastify({ logger: true });
   const onchainWorker = new OnchainEventIngestionWorker(store, providerRegistry, meteringWorker, killSwitchService);
@@ -143,13 +153,60 @@ export function buildApp(
     const limit = Number.isFinite(rawLimit) && rawLimit > 0 ? Math.min(Math.floor(rawLimit), 200) : 20;
 
     return {
-      submissions: store.listUsageSubmissions(limit),
+      submissions: store.listUsageSubmissions(limit).map((submission) => ({
+        ...submission,
+        settlement: store.getLatestUsageSettlementAttempt(submission.id) ?? null,
+      })),
+    };
+  });
+
+  app.post('/settlement/run', async (request) => {
+    const body = (request.body ?? {}) as { submissionId?: string; limitUnattempted?: number; limitRetries?: number };
+
+    if (body.submissionId) {
+      const attempt = await usageSettlementService.runForSubmission(body.submissionId);
+      if (!attempt) {
+        return {
+          processed: 0,
+          settled: 0,
+          failed: 0,
+          results: [],
+          error: 'submission_not_found',
+        };
+      }
+
+      return {
+        processed: 1,
+        settled: attempt.settled ? 1 : 0,
+        failed: attempt.settled ? 0 : 1,
+        results: [attempt],
+      };
+    }
+
+    const limitUnattempted =
+      body.limitUnattempted && Number.isFinite(body.limitUnattempted)
+        ? Math.min(Math.max(1, body.limitUnattempted), 200)
+        : 20;
+    const limitRetries =
+      body.limitRetries && Number.isFinite(body.limitRetries) ? Math.min(Math.max(1, body.limitRetries), 200) : 20;
+
+    return usageSettlementService.run(limitUnattempted, limitRetries);
+  });
+
+  app.get('/settlement/attempts', async (request) => {
+    const query = request.query as { submissionId?: string; limit?: string };
+    const rawLimit = query?.limit ? Number(query.limit) : 50;
+    const limit = Number.isFinite(rawLimit) && rawLimit > 0 ? Math.min(Math.floor(rawLimit), 200) : 50;
+
+    return {
+      attempts: store.listUsageSettlementAttempts(query.submissionId, limit),
     };
   });
 
   app.get('/metering/status', async () => ({
     scheduler: meteringScheduler?.status() ?? { enabled: false, intervalMs: 0 },
     killSwitchRetryScheduler: killSwitchRetryScheduler?.status() ?? { enabled: false, intervalMs: 0 },
+    usageSettlementScheduler: usageSettlementScheduler?.status() ?? { enabled: false, intervalMs: 0 },
   }));
 
   app.post('/messages', async (request, reply) => {
