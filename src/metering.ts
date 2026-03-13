@@ -2,6 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { ComputeAdapterRegistry } from './providers';
 import { ComputeProvider } from './providers/types';
 import { MessageStore, ProviderResourceLink, UsageSubmissionRecord } from './store';
+import type { AlertingService } from './alerting';
 
 export interface MeteringAgreementResult {
   agreementId: string;
@@ -33,7 +34,8 @@ export class DeterministicMeteringWorker {
   constructor(
     private readonly store: MessageStore,
     private readonly providers: ComputeAdapterRegistry,
-    private readonly now: () => string = () => new Date().toISOString()
+    private readonly now: () => string = () => new Date().toISOString(),
+    private readonly alerting?: AlertingService
   ) {}
 
   async runOnce(options: MeterAgreementOptions = {}): Promise<MeteringRunResult> {
@@ -81,6 +83,8 @@ export class DeterministicMeteringWorker {
 
     const adapter = this.providers.get(link.provider);
     if (!adapter) {
+      await this.alerting?.meteringFailure(link.agreementId, link.provider, 'provider_not_supported');
+
       return {
         agreementId: link.agreementId,
         provider: link.provider,
@@ -102,6 +106,8 @@ export class DeterministicMeteringWorker {
     });
 
     if (usageResult.status !== 'ok') {
+      await this.alerting?.meteringFailure(link.agreementId, link.provider, usageResult.message ?? 'usage_poll_failed');
+
       return {
         agreementId: link.agreementId,
         provider: link.provider,

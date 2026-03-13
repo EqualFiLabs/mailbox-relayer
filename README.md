@@ -75,6 +75,8 @@ Environment variables:
 - `USAGE_SETTLEMENT_WEBHOOK_URL` (optional; external signer/settlement worker endpoint)
 - `USAGE_SETTLEMENT_WEBHOOK_TOKEN` (optional; bearer token for settlement webhook)
 - `ADMIN_AUTH_TOKEN` (optional; when set, protects POST endpoints like `/metering/run`, `/killswitch/retries/run`, `/settlement/run` via Bearer token)
+- `ALERT_WEBHOOK_URL` (optional; when set, enables webhook alerts for failures)
+- `ALERT_WEBHOOK_TOKEN` (optional; bearer token for alert webhook)
 
 Durable SQLite state includes:
 - mailbox messages
@@ -85,6 +87,31 @@ Durable SQLite state includes:
 - active kill-switch state
 - termination attempt history + retry metadata (backoff scheduling)
 - processed event keys (idempotency)
+
+### Alerting (optional)
+
+When `ALERT_WEBHOOK_URL` is configured, the relayer sends POST requests for operational failures:
+
+| Alert Kind | Severity | When emitted |
+|------------|----------|--------------|
+| `metering_failure` | `error` | Provider usage poll fails |
+| `termination_failure` | `warning` | Provider termination attempt fails (retry scheduled) |
+| `termination_exhausted` | `critical` | Termination retries exhausted without success |
+| `settlement_failure` | `warning` | Usage settlement attempt fails (retry scheduled) |
+| `settlement_exhausted` | `critical` | Settlement retries exhausted without success |
+
+Payload format:
+```json
+{
+  "kind": "termination_failure",
+  "severity": "warning",
+  "agreementId": "agreement-123",
+  "provider": "venice",
+  "message": "Provider termination attempt failed",
+  "details": { "error": "rpc timeout", "attempt": 2 },
+  "timestamp": "2026-03-10T22:00:00.000Z"
+}
+```
 
 ## Step 4 vertical demo flow
 
