@@ -44,7 +44,14 @@ Scaffolded provider adapter contracts live in `src/providers/`:
 - `venice.ts` → `VeniceComputeAdapter` stub
 - `registry.ts` → no-lock-in adapter registry + default registration
 
-Current stubs return `status: "not_implemented"` and are intended for step-4 wiring.
+Current status:
+- `venice` adapter has a live HTTP implementation scaffold (key create, usage read, revoke flow)
+- `lambda` and `runpod` remain stubbed
+
+Environment variables:
+
+- `VENICE_API_KEY` (required for live Venice operations)
+- `VENICE_BASE_URL` (optional, default `https://api.venice.ai/api/v1`)
 
 ## Step 4 vertical demo flow
 
