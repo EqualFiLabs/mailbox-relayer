@@ -16,7 +16,19 @@ const validEnvelope = {
 };
 
 describe('onchain event ingestion', () => {
-  const app = buildApp();
+  const adminAuthToken = 'test-admin-token';
+  const adminHeaders = { authorization: `Bearer ${adminAuthToken}` };
+  const app = buildApp(
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    { adminAuthToken }
+  );
 
   beforeAll(async () => {
     await app.ready();
@@ -26,10 +38,28 @@ describe('onchain event ingestion', () => {
     await app.close();
   });
 
+  it('requires admin auth for onchain ingestion', async () => {
+    const ingest = await app.inject({
+      method: 'POST',
+      url: '/events/onchain',
+      payload: {
+        chainId: 84532,
+        blockNumber: 99,
+        logIndex: 1,
+        eventType: 'activation',
+        agreementId: 'agreement-auth-1',
+        provider: 'venice',
+      },
+    });
+
+    expect(ingest.statusCode).toBe(401);
+  });
+
   it('processes mailbox events and persists agreement state', async () => {
     const ingest = await app.inject({
       method: 'POST',
       url: '/events/onchain',
+      headers: adminHeaders,
       payload: {
         chainId: 84532,
         blockNumber: 100,
@@ -67,11 +97,13 @@ describe('onchain event ingestion', () => {
       traceId: 'trace-dup-1',
     };
 
-    const first = await app.inject({ method: 'POST', url: '/events/onchain', payload });
-    const second = await app.inject({ method: 'POST', url: '/events/onchain', payload });
-
+    const first = await app.inject({ method: 'POST', url: '/events/onchain', headers: adminHeaders, payload });
+    const second = await app.inject({ method: 'POST', url: '/events/onchain', headers: adminHeaders, payload });
     expect(first.statusCode).toBe(200);
     expect(second.statusCode).toBe(200);
+    
+    const firstBody = first.json();
+    expect(firstBody.accepted).toBe(1);
 
     const secondBody = second.json();
     expect(secondBody.deduped).toBe(1);
@@ -82,6 +114,7 @@ describe('onchain event ingestion', () => {
     const ingest = await app.inject({
       method: 'POST',
       url: '/events/onchain',
+      headers: adminHeaders,
       payload: {
         chainId: 84532,
         blockNumber: 300,

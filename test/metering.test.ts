@@ -77,12 +77,16 @@ class FakeVeniceAdapter implements ComputeProviderAdapter {
 }
 
 describe('deterministic metering loop', () => {
+  const adminAuthToken = 'test-admin-token';
+  const adminHeaders = { authorization: `Bearer ${adminAuthToken}` };
   const store = new InMemoryMessageStore();
   const registry = new ComputeAdapterRegistry();
   const adapter = new FakeVeniceAdapter();
   registry.register(adapter);
 
-  const app = buildApp(store, registry);
+  const app = buildApp(store, registry, undefined, undefined, undefined, undefined, undefined, undefined, {
+    adminAuthToken,
+  });
 
   beforeAll(async () => {
     await app.ready();
@@ -111,6 +115,7 @@ describe('deterministic metering loop', () => {
     const run = await app.inject({
       method: 'POST',
       url: '/metering/run',
+      headers: adminHeaders,
       payload: {
         to: '2026-03-10T21:01:00.000Z',
       },
@@ -142,6 +147,7 @@ describe('deterministic metering loop', () => {
     const ingest = await app.inject({
       method: 'POST',
       url: '/events/onchain',
+      headers: adminHeaders,
       payload: {
         chainId: 84532,
         blockNumber: 900,

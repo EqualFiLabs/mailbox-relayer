@@ -56,6 +56,8 @@ class FlakyVeniceAdapter implements ComputeProviderAdapter {
 }
 
 describe('kill-switch enforcement + retries', () => {
+  const adminAuthToken = 'test-admin-token';
+  const adminHeaders = { authorization: `Bearer ${adminAuthToken}` };
   let nowMs = Date.parse('2026-03-10T22:00:00.000Z');
   const now = () => new Date(nowMs).toISOString();
 
@@ -71,7 +73,9 @@ describe('kill-switch enforcement + retries', () => {
     maxAttempts: 4,
   });
 
-  const app = buildApp(store, registry, undefined, undefined, killSwitchService);
+  const app = buildApp(store, registry, undefined, undefined, killSwitchService, undefined, undefined, undefined, {
+    adminAuthToken,
+  });
 
   beforeAll(async () => {
     await app.ready();
@@ -92,6 +96,7 @@ describe('kill-switch enforcement + retries', () => {
     const ingest = await app.inject({
       method: 'POST',
       url: '/events/onchain',
+      headers: adminHeaders,
       payload: {
         chainId: 84532,
         blockNumber: 500,
@@ -132,6 +137,7 @@ describe('kill-switch enforcement + retries', () => {
     const retryRun = await app.inject({
       method: 'POST',
       url: '/killswitch/retries/run',
+      headers: adminHeaders,
       payload: { limit: 10 },
     });
 

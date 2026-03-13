@@ -31,9 +31,7 @@ export class OnchainEventIngestionWorker {
 
   async ingest(event: OnchainEvent): Promise<OnchainIngestionResult> {
     const eventKey = this.toEventKey(event);
-    const accepted = this.store.markEventProcessed(eventKey, event.blockNumber, event.logIndex);
-
-    if (!accepted) {
+    if (this.store.isEventProcessed(eventKey)) {
       return {
         accepted: true,
         deduped: true,
@@ -45,15 +43,34 @@ export class OnchainEventIngestionWorker {
       };
     }
 
+    let result: OnchainIngestionResult;
+
     if (event.eventType === 'mailbox') {
-      return this.handleMailboxEvent(event, eventKey);
+      result = await this.handleMailboxEvent(event, eventKey);
+    } else if (event.eventType === 'activation') {
+      result = await this.handleActivationEvent(event, eventKey);
+    } else {
+      result = await this.handleBreachOrDefaultEvent(event, eventKey);
     }
 
-    if (event.eventType === 'activation') {
-      return this.handleActivationEvent(event, eventKey);
+    // Persist dedupe marker only after a successful acceptance path.
+    if (result.accepted) {
+      const marked = this.store.markEventProcessed(eventKey, event.blockNumber, event.logIndex);
+      if (!marked) {
+        return {
+          accepted: true,
+          deduped: true,
+          eventKey,
+          eventType: event.eventType,
+          agreementId: event.agreementId,
+          ...(event.provider ? { provider: event.provider } : {}),
+          action: 'dedupe_skip',
+          message: 'event already processed concurrently',
+        };
+      }
     }
 
-    return this.handleBreachOrDefaultEvent(event, eventKey);
+    return result;
   }
 
   async ingestMany(events: OnchainEvent[]): Promise<OnchainIngestionResult[]> {

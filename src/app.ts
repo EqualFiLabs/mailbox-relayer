@@ -20,6 +20,10 @@ import {
   UsageSettlementService,
 } from './settlement';
 
+interface BuildAppOptions {
+  adminAuthToken?: string;
+}
+
 export function buildApp(
   store: MessageStore = createDefaultStore(),
   providerRegistry: ComputeAdapterRegistry = createDefaultComputeAdapterRegistry(),
@@ -31,17 +35,31 @@ export function buildApp(
     store,
     new DisabledUsageSettlementSender()
   ),
-  usageSettlementScheduler?: UsageSettlementScheduler
+  usageSettlementScheduler?: UsageSettlementScheduler,
+  options: BuildAppOptions = {}
 ) {
   const app = Fastify({ logger: true });
+  const adminAuthToken = options.adminAuthToken ?? process.env.ADMIN_AUTH_TOKEN;
 
   const requireAdminAuth = async (request: FastifyRequest, reply: FastifyReply) => {
-    const token = process.env.ADMIN_AUTH_TOKEN;
+    const token = adminAuthToken;
     if (token) {
       const auth = request.headers.authorization;
       if (auth !== `Bearer ${token}`) {
         return reply.status(401).send({ error: 'unauthorized' });
       }
+    }
+  };
+
+  const requireAdminAuthStrict = async (request: FastifyRequest, reply: FastifyReply) => {
+    const token = adminAuthToken;
+    if (!token) {
+      return reply.status(503).send({ error: 'admin_auth_not_configured' });
+    }
+
+    const auth = request.headers.authorization;
+    if (auth !== `Bearer ${token}`) {
+      return reply.status(401).send({ error: 'unauthorized' });
     }
   };
 
@@ -86,7 +104,7 @@ export function buildApp(
 
   app.get('/providers', async () => ({ providers: providerRegistry.list() }));
 
-  app.post('/events/onchain', async (request, reply) => {
+  app.post('/events/onchain', { preHandler: [requireAdminAuthStrict] }, async (request, reply) => {
     const singleParsed = onchainEventSchema.safeParse(request.body);
 
     let events;

@@ -123,6 +123,7 @@ export interface MessageStore {
   listTerminationAttempts(agreementId?: string, limit?: number): TerminationAttemptRecord[];
   listDueTerminationRetries(nowIso: string, limit?: number): TerminationAttemptRecord[];
 
+  isEventProcessed(eventKey: string): boolean;
   markEventProcessed(eventKey: string, blockNumber: number, logIndex: number): boolean;
 }
 
@@ -304,6 +305,10 @@ export class InMemoryMessageStore implements MessageStore {
       })
       .sort((a, b) => (a.nextRetryAt ?? '').localeCompare(b.nextRetryAt ?? ''))
       .slice(0, limit);
+  }
+
+  isEventProcessed(eventKey: string): boolean {
+    return this.processedEvents.has(eventKey);
   }
 
   markEventProcessed(eventKey: string): boolean {
@@ -1061,6 +1066,13 @@ export class SQLiteMessageStore implements MessageStore {
     }>;
 
     return rows.map(rowToTerminationAttempt);
+  }
+
+  isEventProcessed(eventKey: string): boolean {
+    const row = this.db
+      .prepare(`SELECT 1 AS exists_flag FROM processed_events WHERE event_key = ? LIMIT 1`)
+      .get(eventKey) as { exists_flag: number } | undefined;
+    return Boolean(row?.exists_flag);
   }
 
   markEventProcessed(eventKey: string, blockNumber: number, logIndex: number): boolean {
