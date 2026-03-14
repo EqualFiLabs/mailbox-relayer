@@ -195,4 +195,89 @@ describe('provider differential parity', () => {
     expect(venice.status).toBe('error');
     expect(venice.message).toBe('provider_not_supported');
   });
+
+  it('consumes webhook-ingested provider events before fallback polling', async () => {
+    const store = new InMemoryMessageStore();
+    const registry = new ComputeAdapterRegistry();
+
+    store.setProviderLink({
+      agreementId: 'agreement-webhook-first-1',
+      provider: 'runpod',
+      providerResourceId: 'runpod-job-1',
+      updatedAt: '2026-03-11T03:00:00.000Z',
+    });
+
+    store.upsertProviderEvent({
+      provider: 'runpod',
+      providerResourceId: 'runpod-job-1',
+      externalEventId: 'evt-runpod-1',
+      payloadJson: JSON.stringify({
+        usage: [
+          {
+            unitType: 'RUNPOD_GPU_SECOND',
+            amount: '12',
+            observedAt: '2026-03-11T03:00:10.000Z',
+            requestId: 'evt-runpod-1',
+          },
+        ],
+      }),
+      observedAt: '2026-03-11T03:00:10.000Z',
+      createdAt: '2026-03-11T03:00:11.000Z',
+    });
+
+    const worker = new DeterministicMeteringWorker(store, registry);
+    const result = await worker.runForAgreement('agreement-webhook-first-1', { to: '2026-03-11T03:01:00.000Z' });
+
+    expect(result.status).toBe('prepared');
+    expect(result.provider).toBe('runpod');
+    expect(result.aggregatedItems).toEqual([{ unitType: 'RUNPOD_GPU_SECOND', amount: '12' }]);
+  });
+
+  it('dedupes webhook and polled usage rows by external event/job id', async () => {
+    const store = new InMemoryMessageStore();
+    const registry = new ComputeAdapterRegistry();
+
+    registry.register(
+      new StaticUsageAdapter('venice', [
+        {
+          unitType: 'VENICE_TEXT_TOKEN_IN',
+          amount: '10',
+          observedAt: '2026-03-11T04:00:10.000Z',
+          requestId: 'evt-venice-1',
+        },
+      ])
+    );
+
+    store.setProviderLink({
+      agreementId: 'agreement-dedupe-1',
+      provider: 'venice',
+      providerResourceId: 'venice-key-dedupe-1',
+      updatedAt: '2026-03-11T04:00:00.000Z',
+    });
+
+    store.upsertProviderEvent({
+      provider: 'venice',
+      providerResourceId: 'venice-key-dedupe-1',
+      externalEventId: 'evt-venice-1',
+      payloadJson: JSON.stringify({
+        usage: [
+          {
+            unitType: 'VENICE_TEXT_TOKEN_IN',
+            amount: '10',
+            observedAt: '2026-03-11T04:00:10.000Z',
+            requestId: 'evt-venice-1',
+          },
+        ],
+      }),
+      observedAt: '2026-03-11T04:00:10.000Z',
+      createdAt: '2026-03-11T04:00:11.000Z',
+    });
+
+    const worker = new DeterministicMeteringWorker(store, registry);
+    const result = await worker.runForAgreement('agreement-dedupe-1', { to: '2026-03-11T04:01:00.000Z' });
+
+    expect(result.status).toBe('prepared');
+    expect(result.aggregatedItems).toEqual([{ unitType: 'VENICE_TEXT_TOKEN_IN', amount: '10' }]);
+    expect(result.usageRows).toBe(1);
+  });
 });

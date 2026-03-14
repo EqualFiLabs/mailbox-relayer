@@ -30,6 +30,13 @@ interface MeterAgreementOptions {
   finalPass?: boolean;
 }
 
+interface MeteringUsageRow {
+  unitType: string;
+  amount: string;
+  observedAt: string;
+  requestId?: string;
+}
+
 export class DeterministicMeteringWorker {
   constructor(
     private readonly store: MessageStore,
@@ -80,9 +87,10 @@ export class DeterministicMeteringWorker {
     const to = options.to ?? this.now();
     const from = checkpoint?.lastUsageTimestamp;
     const finalPass = Boolean(options.finalPass);
+    const providerEventRows = this.readUsageFromProviderEvents(link, from, to);
 
     const adapter = this.providers.get(link.provider);
-    if (!adapter) {
+    if (!adapter && providerEventRows.length === 0) {
       await this.alerting?.meteringFailure(link.agreementId, link.provider, 'provider_not_supported');
 
       return {
@@ -98,30 +106,41 @@ export class DeterministicMeteringWorker {
       };
     }
 
-    const usageResult = await adapter.usage({
-      agreementId: link.agreementId,
-      providerResourceId: link.providerResourceId,
-      ...(from ? { from } : {}),
-      to,
-    });
+    let adapterRows: MeteringUsageRow[] = [];
+    let adapterError: string | undefined;
 
-    if (usageResult.status !== 'ok') {
-      await this.alerting?.meteringFailure(link.agreementId, link.provider, usageResult.message ?? 'usage_poll_failed');
-
-      return {
+    if (adapter) {
+      const usageResult = await adapter.usage({
         agreementId: link.agreementId,
-        provider: link.provider,
-        status: 'error',
+        providerResourceId: link.providerResourceId,
         ...(from ? { from } : {}),
         to,
-        usageRows: 0,
-        aggregatedItems: [],
-        finalPass,
-        message: usageResult.message ?? 'usage_poll_failed',
-      };
+      });
+
+      if (usageResult.status !== 'ok') {
+        if (providerEventRows.length === 0) {
+          await this.alerting?.meteringFailure(link.agreementId, link.provider, usageResult.message ?? 'usage_poll_failed');
+
+          return {
+            agreementId: link.agreementId,
+            provider: link.provider,
+            status: 'error',
+            ...(from ? { from } : {}),
+            to,
+            usageRows: 0,
+            aggregatedItems: [],
+            finalPass,
+            message: usageResult.message ?? 'usage_poll_failed',
+          };
+        }
+
+        adapterError = usageResult.message ?? 'usage_poll_failed';
+      } else {
+        adapterRows = usageResult.usage;
+      }
     }
 
-    const rows = usageResult.usage
+    const rows = dedupeUsageRowsByRequestId([...providerEventRows, ...adapterRows])
       .filter((row) => {
         const observed = Date.parse(row.observedAt);
         if (Number.isNaN(observed)) return false;
@@ -193,7 +212,33 @@ export class DeterministicMeteringWorker {
       aggregatedItems,
       finalPass,
       ...(submissionId ? { submissionId } : {}),
+      ...(adapterError ? { message: `provider_events_fallback_used:${adapterError}` } : {}),
     };
+  }
+
+  private readUsageFromProviderEvents(
+    link: ProviderResourceLink,
+    from: string | undefined,
+    to: string
+  ): MeteringUsageRow[] {
+    const records = this.store.listProviderEvents(link.provider, link.providerResourceId, from, to, 1_000);
+    const rows: MeteringUsageRow[] = [];
+
+    for (const record of records) {
+      const parsed = parseProviderEventPayload(record.payloadJson);
+      if (!parsed) continue;
+
+      for (const row of parsed) {
+        rows.push({
+          unitType: row.unitType,
+          amount: row.amount,
+          observedAt: row.observedAt ?? record.observedAt,
+          requestId: row.requestId ?? record.externalEventId,
+        });
+      }
+    }
+
+    return rows;
   }
 }
 
@@ -256,6 +301,92 @@ function aggregateUsageRows(
   return [...map.entries()]
     .map(([unitType, amount]) => ({ unitType, amount }))
     .sort((a, b) => a.unitType.localeCompare(b.unitType));
+}
+
+function dedupeUsageRowsByRequestId(rows: MeteringUsageRow[]): MeteringUsageRow[] {
+  const out = new Map<string, MeteringUsageRow>();
+
+  for (const row of rows) {
+    const key = row.requestId ? `request:${row.requestId}` : `fallback:${row.unitType}:${row.amount}:${row.observedAt}`;
+    if (!out.has(key)) {
+      out.set(key, row);
+    }
+  }
+
+  return [...out.values()];
+}
+
+function parseProviderEventPayload(
+  payloadJson: string
+): Array<{ unitType: string; amount: string; observedAt?: string; requestId?: string }> | undefined {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(payloadJson);
+  } catch {
+    return undefined;
+  }
+
+  const directRows =
+    readUsageRows(parsed) ??
+    (isRecord(parsed) && isRecord(parsed.usage) ? readUsageRows(parsed.usage) : undefined) ??
+    (isRecord(parsed) && isRecord(parsed.payload) ? readUsageRows(parsed.payload) : undefined);
+
+  return directRows;
+}
+
+function readUsageRows(
+  value: unknown
+): Array<{ unitType: string; amount: string; observedAt?: string; requestId?: string }> | undefined {
+  if (Array.isArray(value)) {
+    const rows = value
+      .map(normalizeProviderUsageRow)
+      .filter((row): row is { unitType: string; amount: string; observedAt?: string; requestId?: string } => row !== undefined);
+    return rows.length > 0 ? rows : undefined;
+  }
+
+  if (!isRecord(value)) return undefined;
+
+  if (Array.isArray(value.rows)) {
+    return readUsageRows(value.rows);
+  }
+
+  if (Array.isArray(value.usage)) {
+    return readUsageRows(value.usage);
+  }
+
+  const single = normalizeProviderUsageRow(value);
+  return single ? [single] : undefined;
+}
+
+function normalizeProviderUsageRow(
+  value: unknown
+): { unitType: string; amount: string; observedAt?: string; requestId?: string } | undefined {
+  if (!isRecord(value)) return undefined;
+  if (typeof value.unitType !== 'string' || value.unitType.length === 0) return undefined;
+
+  const amount =
+    typeof value.amount === 'string'
+      ? value.amount
+      : typeof value.amount === 'number' || typeof value.amount === 'bigint'
+        ? String(value.amount)
+        : undefined;
+
+  if (!amount) return undefined;
+
+  return {
+    unitType: value.unitType,
+    amount,
+    ...(typeof value.observedAt === 'string' ? { observedAt: value.observedAt } : {}),
+    ...(typeof value.requestId === 'string'
+      ? { requestId: value.requestId }
+      : typeof value.externalEventId === 'string'
+        ? { requestId: value.externalEventId }
+        : {}),
+  };
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
 function addDecimalStrings(a: string, b: string): string {

@@ -51,6 +51,8 @@ export class TransactionSubmitter implements UsageSettlementSender {
   private readonly receiptPollIntervalMs: number;
   private readonly maxGasPriceWei: bigint;
   private lowBalanceAlertActive = false;
+  private inFlightCount = 0;
+  private idleWaiters: Array<() => void> = [];
 
   constructor(
     private readonly config: TxSubmitterConfig,
@@ -76,56 +78,58 @@ export class TransactionSubmitter implements UsageSettlementSender {
   }
 
   async send(submission: UsageSubmissionRecord): Promise<UsageSettlementSenderResult> {
-    let agreementId: bigint;
-    try {
-      agreementId = agreementIdToUint256(submission.agreementId);
-    } catch {
-      return { status: 'error', message: 'invalid_agreement_id' };
-    }
-
-    let entries: Array<{ agreementId: bigint; unitType: string; amount: bigint }>;
-    try {
-      entries = submission.items.map((item) => ({
-        agreementId,
-        unitType: unitTypeToBytes32(item.unitType),
-        amount: scaleAmountToUint256(item.amount),
-      }));
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      if (message === 'amount_overflow') {
-        return { status: 'error', message: 'amount_overflow' };
+    return this.withInFlight(async () => {
+      let agreementId: bigint;
+      try {
+        agreementId = agreementIdToUint256(submission.agreementId);
+      } catch {
+        return { status: 'error', message: 'invalid_agreement_id' };
       }
-      if (message === 'invalid_amount') {
-        return { status: 'error', message: 'invalid_amount' };
+
+      let entries: Array<{ agreementId: bigint; unitType: string; amount: bigint }>;
+      try {
+        entries = submission.items.map((item) => ({
+          agreementId,
+          unitType: unitTypeToBytes32(item.unitType),
+          amount: scaleAmountToUint256(item.amount),
+        }));
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        if (message === 'amount_overflow') {
+          return { status: 'error', message: 'amount_overflow' };
+        }
+        if (message === 'invalid_amount') {
+          return { status: 'error', message: 'invalid_amount' };
+        }
+        return { status: 'error', message };
       }
-      return { status: 'error', message };
-    }
 
-    const data =
-      entries.length === 1
-        ? COMPUTE_USAGE_IFACE.encodeFunctionData('registerUsage', [
-            entries[0].agreementId,
-            entries[0].unitType,
-            entries[0].amount,
-          ])
-        : COMPUTE_USAGE_IFACE.encodeFunctionData('batchRegisterUsage', [entries]);
+      const data =
+        entries.length === 1
+          ? COMPUTE_USAGE_IFACE.encodeFunctionData('registerUsage', [
+              entries[0].agreementId,
+              entries[0].unitType,
+              entries[0].amount,
+            ])
+          : COMPUTE_USAGE_IFACE.encodeFunctionData('batchRegisterUsage', [entries]);
 
-    const result = await this.submitCalldata(data, submission.agreementId, submission.id);
+      const result = await this.submitCalldata(data, submission.agreementId, submission.id);
 
-    if (result.status === 'ok') {
-      this.logger.info?.(
-        {
-          agreementId: submission.agreementId,
-          submissionId: submission.id,
-          txHash: result.txHash,
-          nonce: result.nonce,
-          gasUsed: result.gasUsed?.toString(),
-        },
-        'usage settlement tx submitted'
-      );
-    }
+      if (result.status === 'ok') {
+        this.logger.info?.(
+          {
+            agreementId: submission.agreementId,
+            submissionId: submission.id,
+            txHash: result.txHash,
+            nonce: result.nonce,
+            gasUsed: result.gasUsed?.toString(),
+          },
+          'usage settlement tx submitted'
+        );
+      }
 
-    return result;
+      return result;
+    });
   }
 
   async publishProviderPayload(
@@ -133,40 +137,60 @@ export class TransactionSubmitter implements UsageSettlementSender {
     providerCredentials: Record<string, unknown>,
     borrowerAddress: string
   ): Promise<{ txHash?: string; error?: string }> {
-    let agreementIdUint: bigint;
-    try {
-      agreementIdUint = agreementIdToUint256(agreementId);
-    } catch {
-      return { error: 'invalid_agreement_id' };
-    }
+    return this.withInFlight(async () => {
+      let agreementIdUint: bigint;
+      try {
+        agreementIdUint = agreementIdToUint256(agreementId);
+      } catch {
+        return { error: 'invalid_agreement_id' };
+      }
 
-    if (!isAddress(borrowerAddress)) {
-      return { error: 'invalid_borrower_address' };
-    }
+      if (!isAddress(borrowerAddress)) {
+        return { error: 'invalid_borrower_address' };
+      }
 
-    const borrowerKey = await this.getBorrowerEncryptionKey(borrowerAddress);
-    if (!borrowerKey) {
-      this.logger.error?.({ agreementId, borrowerAddress }, 'missing borrower encryption key');
-      return { error: 'no_encryption_key' };
-    }
+      const borrowerKey = await this.getBorrowerEncryptionKey(borrowerAddress);
+      if (!borrowerKey) {
+        this.logger.error?.({ agreementId, borrowerAddress }, 'missing borrower encryption key');
+        return { error: 'no_encryption_key' };
+      }
 
-    const envelopeString = await MailboxCompat.encryptPayload(borrowerKey, providerCredentials);
-    const envelopeBytes = toUtf8Bytes(envelopeString);
-    const data = MAILBOX_IFACE.encodeFunctionData('publishProviderPayload', [agreementIdUint, envelopeBytes]);
+      const envelopeString = await MailboxCompat.encryptPayload(borrowerKey, providerCredentials);
+      const envelopeBytes = toUtf8Bytes(envelopeString);
+      const data = MAILBOX_IFACE.encodeFunctionData('publishProviderPayload', [agreementIdUint, envelopeBytes]);
 
-    const result = await this.submitCalldata(data, agreementId);
-    if (result.status === 'ok') {
-      return { txHash: result.txHash };
-    }
+      const result = await this.submitCalldata(data, agreementId);
+      if (result.status === 'ok') {
+        return { txHash: result.txHash };
+      }
 
-    this.logger.error?.({ agreementId, message: result.message }, 'publishProviderPayload failed');
-    await this.alerting?.emitAlert('provider_payload_publish_failed', 'error', result.message ?? 'publish_failed', {
-      agreementId,
-      details: {
-        borrowerAddress,
-      },
+      this.logger.error?.({ agreementId, message: result.message }, 'publishProviderPayload failed');
+      await this.alerting?.emitAlert('provider_payload_publish_failed', 'error', result.message ?? 'publish_failed', {
+        agreementId,
+        details: {
+          borrowerAddress,
+        },
+      });
+      return { error: result.message ?? 'publish_failed' };
     });
-    return { error: result.message ?? 'publish_failed' };
+  }
+
+  async waitForIdle(timeoutMs = this.txTimeoutMs): Promise<void> {
+    if (this.inFlightCount === 0) return;
+
+    await new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.idleWaiters = this.idleWaiters.filter((candidate) => candidate !== onIdle);
+        reject(new Error('tx_submitter_wait_for_idle_timeout'));
+      }, timeoutMs);
+
+      const onIdle = () => {
+        clearTimeout(timer);
+        resolve();
+      };
+
+      this.idleWaiters.push(onIdle);
+    });
   }
 
   async status(): Promise<TransactionSubmitterStatus> {
@@ -399,5 +423,21 @@ export class TransactionSubmitter implements UsageSettlementSender {
       return;
     }
     await new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
+  private async withInFlight<T>(fn: () => Promise<T>): Promise<T> {
+    this.inFlightCount += 1;
+    try {
+      return await fn();
+    } finally {
+      this.inFlightCount = Math.max(0, this.inFlightCount - 1);
+      if (this.inFlightCount === 0) {
+        const waiters = this.idleWaiters;
+        this.idleWaiters = [];
+        for (const waiter of waiters) {
+          waiter();
+        }
+      }
+    }
   }
 }

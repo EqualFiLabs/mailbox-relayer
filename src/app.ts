@@ -14,6 +14,9 @@ import { ComputeAdapterRegistry, createDefaultComputeAdapterRegistry } from './p
 import { IdentityGateConfig, OnchainEventIngestionWorker } from './events';
 import { DeterministicMeteringWorker, MeteringScheduler } from './metering';
 import { KillSwitchEnforcementService, KillSwitchRetryScheduler } from './killswitch';
+import { EventListener } from './event-listener';
+import { TransactionSubmitter } from './tx-submitter';
+import { ProviderEventIngress } from './provider-event-ingress';
 import {
   DisabledUsageSettlementSender,
   UsageSettlementScheduler,
@@ -23,6 +26,9 @@ import {
 interface BuildAppOptions {
   adminAuthToken?: string;
   identityGate?: IdentityGateConfig;
+  eventListener?: EventListener;
+  txSubmitter?: TransactionSubmitter;
+  providerEventIngress?: ProviderEventIngress;
 }
 
 function envNumber(value: string | undefined): number | undefined {
@@ -108,8 +114,13 @@ export function buildApp(
     providerRegistry,
     meteringWorker,
     killSwitchService,
-    options.identityGate ?? envIdentityGate()
+    options.identityGate ?? envIdentityGate(),
+    options.txSubmitter
   );
+
+  if (options.providerEventIngress) {
+    void options.providerEventIngress.register(app);
+  }
 
   app.get('/health', async () => ({ ok: true }));
 
@@ -117,11 +128,28 @@ export function buildApp(
     const metering = meteringScheduler?.status() ?? { enabled: false, intervalMs: 0 };
     const killSwitchRetry = killSwitchRetryScheduler?.status() ?? { enabled: false, intervalMs: 0 };
     const usageSettlement = usageSettlementScheduler?.status() ?? { enabled: false, intervalMs: 0 };
+    const eventListener = options.eventListener?.status() ?? {
+      isPolling: false,
+      lastConfirmedBlock: 0,
+      chainHead: 0,
+      blocksBehind: 0,
+    };
+    const txSubmitter = options.txSubmitter
+      ? await options.txSubmitter.status()
+      : {
+          walletAddress: '',
+          walletBalance: '0',
+          pendingNonce: 0,
+          isEnabled: false,
+        };
+    const providerEventIngress = options.providerEventIngress?.status() ?? { enabled: false };
 
     const allSchedulersReady =
       (!metering.enabled || metering.running === true) &&
       (!killSwitchRetry.enabled || killSwitchRetry.running === true) &&
-      (!usageSettlement.enabled || usageSettlement.running === true);
+      (!usageSettlement.enabled || usageSettlement.running === true) &&
+      (!options.eventListener || eventListener.isPolling === true) &&
+      (!options.txSubmitter || txSubmitter.isEnabled === true);
 
     return {
       ready: allSchedulersReady,
@@ -129,6 +157,11 @@ export function buildApp(
         metering,
         killSwitchRetry,
         usageSettlement,
+      },
+      integrations: {
+        eventListener,
+        txSubmitter,
+        providerEventIngress,
       },
     };
   });

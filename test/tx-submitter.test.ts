@@ -365,4 +365,19 @@ describe('TransactionSubmitter', () => {
     expect(second.walletBalance).toBe('0.001');
     expect(h.alerting.emitAlert).toHaveBeenCalledTimes(1);
   });
+
+  it('waitForIdle() waits until in-flight transaction submission completes', async () => {
+    const h = makeHarness({ txTimeoutMs: 100, receiptPollIntervalMs: 1 });
+    h.receiptQueue.set('0xaaa', [null, { status: 1, gasUsed: 21_000n, blockNumber: 99 }]);
+
+    const sendPromise = h.submitter.send(
+      makeSubmission([{ unitType: 'VENICE_TEXT_TOKEN_IN', amount: '1' }])
+    );
+
+    await h.submitter.waitForIdle(1000);
+
+    const sendResult = await sendPromise;
+    expect(sendResult.status).toBe('ok');
+    expect(sendResult.txHash).toBe('0xaaa');
+  });
 });

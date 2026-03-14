@@ -7,6 +7,7 @@ import { ComputeAdapterRegistry, ComputeProvider } from './providers';
 import { DeterministicMeteringWorker } from './metering';
 import { KillSwitchEnforcementService } from './killswitch';
 import { verifyIdentityProof } from './identity-resolver';
+import { isAddress } from 'ethers';
 
 export type OnchainEvent = z.infer<typeof onchainEventSchema>;
 
@@ -33,13 +34,22 @@ export interface IdentityGateConfig {
   resolveWallet?: (agentRegistry: string, agentId: string) => Promise<string>;
 }
 
+export interface ProviderPayloadPublisher {
+  publishProviderPayload(
+    agreementId: string,
+    providerCredentials: Record<string, unknown>,
+    borrowerAddress: string
+  ): Promise<{ txHash?: string; error?: string }>;
+}
+
 export class OnchainEventIngestionWorker {
   constructor(
     private readonly store: MessageStore,
     private readonly providers: ComputeAdapterRegistry,
     private readonly meteringWorker?: DeterministicMeteringWorker,
     private readonly killSwitchService?: KillSwitchEnforcementService,
-    private readonly identityGate: IdentityGateConfig = { mode: 'none' }
+    private readonly identityGate: IdentityGateConfig = { mode: 'none' },
+    private readonly txSubmitter?: ProviderPayloadPublisher
   ) {}
 
   async ingest(event: OnchainEvent): Promise<OnchainIngestionResult> {
@@ -264,6 +274,45 @@ export class OnchainEventIngestionWorker {
       });
     }
 
+    let providerPayloadPublish:
+      | {
+          status: 'published';
+          txHash?: string;
+        }
+      | {
+          status: 'skipped';
+          reason: string;
+        }
+      | {
+          status: 'failed';
+          error: string;
+        }
+      | undefined;
+
+    if (this.txSubmitter && provision.connection && this.isRecord(provision.connection)) {
+      const borrowerAddress = this.readBorrowerAddress(event.policy, event.payload);
+      if (!borrowerAddress) {
+        providerPayloadPublish = { status: 'skipped', reason: 'missing_borrower_address' };
+      } else {
+        const publish = await this.txSubmitter.publishProviderPayload(
+          event.agreementId,
+          provision.connection,
+          borrowerAddress
+        );
+
+        if (publish.error) {
+          providerPayloadPublish = { status: 'failed', error: publish.error };
+        } else {
+          providerPayloadPublish = {
+            status: 'published',
+            ...(publish.txHash ? { txHash: publish.txHash } : {}),
+          };
+        }
+      }
+    } else if (this.txSubmitter && !provision.connection) {
+      providerPayloadPublish = { status: 'skipped', reason: 'missing_provider_credentials' };
+    }
+
     this.store.setAgreementState(
       this.toStateRecord(event.agreementId, provision.status === 'ok' ? 'active' : 'activation_failed', event.traceId)
     );
@@ -279,6 +328,7 @@ export class OnchainEventIngestionWorker {
       meta: {
         providerResultStatus: provision.status,
         ...(provision.providerResourceId ? { providerResourceId: provision.providerResourceId } : {}),
+        ...(providerPayloadPublish ? { providerPayloadPublish } : {}),
       },
     };
   }
@@ -433,6 +483,51 @@ export class OnchainEventIngestionWorker {
       return 'default';
     }
     return undefined;
+  }
+
+  private readBorrowerAddress(
+    policy?: Record<string, unknown>,
+    payload?: Record<string, unknown>
+  ): string | undefined {
+    const direct = [
+      this.readAddress(policy, ['borrowerAddress', 'borrower', 'authorizedAddress']),
+      this.readAddress(payload, ['borrowerAddress', 'borrower', 'authorizedAddress']),
+    ].find((value) => value !== undefined);
+
+    if (direct) return direct;
+
+    const payloadIdentity = this.readRecord(payload, ['identity']);
+    const policyIdentity = this.readRecord(policy, ['identity']);
+
+    return (
+      this.readAddress(payloadIdentity, ['authorizedAddress']) ??
+      this.readAddress(policyIdentity, ['authorizedAddress']) ??
+      undefined
+    );
+  }
+
+  private readAddress(source: Record<string, unknown> | undefined, keys: string[]): string | undefined {
+    if (!source) return undefined;
+    for (const key of keys) {
+      const value = source[key];
+      if (typeof value === 'string' && isAddress(value)) {
+        return value;
+      }
+    }
+    return undefined;
+  }
+
+  private readRecord(source: Record<string, unknown> | undefined, keys: string[]): Record<string, unknown> | undefined {
+    if (!source) return undefined;
+    for (const key of keys) {
+      const value = source[key];
+      if (this.isRecord(value)) return value;
+    }
+    return undefined;
+  }
+
+  private isRecord(value: unknown): value is Record<string, unknown> {
+    return typeof value === 'object' && value !== null && !Array.isArray(value);
   }
 
   private toStateRecord(

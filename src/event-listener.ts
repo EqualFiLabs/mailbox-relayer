@@ -42,6 +42,22 @@ interface PendingBlock {
   events: DecodedDiamondEvent[];
 }
 
+export interface EventOrderKey {
+  blockNumber: number;
+  logIndex: number;
+}
+
+export function compareByBlockAndLogIndex(a: EventOrderKey, b: EventOrderKey): number {
+  if (a.blockNumber !== b.blockNumber) {
+    return a.blockNumber - b.blockNumber;
+  }
+  return a.logIndex - b.logIndex;
+}
+
+export function sortByBlockAndLogIndex<T extends EventOrderKey>(items: readonly T[]): T[] {
+  return [...items].sort(compareByBlockAndLogIndex);
+}
+
 const EVENT_SIGNATURES = [
   'AgreementActivated(uint256,uint256,uint8)',
   'BorrowerPayloadPublished(uint256,address,bytes)',
@@ -338,7 +354,7 @@ export class EventListener {
   }
 
   private async deliverBlock(block: PendingBlock): Promise<void> {
-    const ordered = [...block.events].sort((a, b) => a.logIndex - b.logIndex);
+    const ordered = sortByBlockAndLogIndex(block.events);
 
     for (const decoded of ordered) {
       const mapped = this.mapDecodedEvent(decoded);
