@@ -337,3 +337,283 @@ describe('RunPodComputeAdapter dedicated pod provisioning', () => {
     expect(result.meta).toMatchObject({ statusCode: 400, requestId: 'req-pod-err-1' });
   });
 });
+
+describe('RunPodComputeAdapter usage metering', () => {
+  it('computes serverless usage from persisted completion events with status fallback and deduplication', async () => {
+    const mockFetch: typeof fetch = async (input, init) => {
+      const url = String(input);
+      const method = (init?.method ?? 'GET').toUpperCase();
+      if (url.includes('/ep_usage_1/status/job-3') && method === 'GET') {
+        return makeResponse({
+          ok: true,
+          status: 200,
+          json: {
+            data: {
+              id: 'job-3',
+              status: 'COMPLETED',
+              executionTime: 4,
+              completedAt: '2026-03-14T10:02:30.000Z',
+            },
+          },
+        });
+      }
+      return makeResponse({ ok: false, status: 404, json: { error: 'unexpected request' } });
+    };
+
+    const adapter = new RunPodComputeAdapter({
+      apiKey: 'runpod-key',
+      fetchFn: mockFetch,
+      loadCompletionEvents: async () => [
+        {
+          id: 'job-1',
+          status: 'COMPLETED',
+          executionTime: 2,
+          completedAt: '2026-03-14T10:01:00.000Z',
+        },
+        {
+          id: 'job-2',
+          status: 'COMPLETED',
+          executionTimeMs: 1500,
+          completedAt: '2026-03-14T10:02:00.000Z',
+        },
+      ],
+      loadInFlightJobIds: async () => ['job-2', 'job-3'],
+    });
+
+    const result = await adapter.usage({
+      agreementId: 'agreement-rp-usage-1',
+      providerResourceId: 'ep_usage_1',
+      from: '2026-03-14T10:00:00.000Z',
+      to: '2026-03-14T10:10:00.000Z',
+    });
+
+    expect(result.status).toBe('ok');
+    expect(result.usage).toEqual([
+      {
+        unitType: 'RUNPOD_INFERENCE_REQUEST',
+        amount: '3',
+        observedAt: '2026-03-14T10:02:30.000Z',
+      },
+      {
+        unitType: 'RUNPOD_GPU_SEC',
+        amount: '7.5',
+        observedAt: '2026-03-14T10:02:30.000Z',
+      },
+    ]);
+  });
+
+  it('computes pod usage as GPU-hours from pod runtime window', async () => {
+    const mockFetch: typeof fetch = async (input, init) => {
+      const url = String(input);
+      const method = (init?.method ?? 'GET').toUpperCase();
+      if (url.endsWith('/pods/pod_usage_1') && method === 'GET') {
+        return makeResponse({
+          ok: true,
+          status: 200,
+          json: {
+            data: {
+              id: 'pod_usage_1',
+              desiredStatus: 'RUNNING',
+              createdAt: '2026-03-14T08:00:00.000Z',
+              gpu: { displayName: 'NVIDIA A100 80GB' },
+            },
+          },
+        });
+      }
+      return makeResponse({ ok: false, status: 404, json: { error: 'unexpected request' } });
+    };
+
+    const adapter = new RunPodComputeAdapter({ apiKey: 'runpod-key', fetchFn: mockFetch });
+    const result = await adapter.usage({
+      agreementId: 'agreement-rp-usage-2',
+      providerResourceId: 'pod_usage_1',
+      from: '2026-03-14T09:00:00.000Z',
+      to: '2026-03-14T11:00:00.000Z',
+    });
+
+    expect(result.status).toBe('ok');
+    expect(result.usage).toEqual([
+      {
+        unitType: 'GPU_HOUR_A100',
+        amount: '2.000000000000000000',
+        observedAt: '2026-03-14T11:00:00.000Z',
+      },
+    ]);
+  });
+
+  it('returns serverless usage error when fallback status polling fails', async () => {
+    const mockFetch: typeof fetch = async (input, init) => {
+      const url = String(input);
+      const method = (init?.method ?? 'GET').toUpperCase();
+      if (url.includes('/ep_usage_err/status/job-err') && method === 'GET') {
+        return makeResponse({
+          ok: false,
+          status: 500,
+          headers: { 'x-request-id': 'req-usage-status-err' },
+          json: { error: 'internal error' },
+        });
+      }
+      return makeResponse({ ok: false, status: 404, json: { error: 'unexpected request' } });
+    };
+
+    const adapter = new RunPodComputeAdapter({
+      apiKey: 'runpod-key',
+      fetchFn: mockFetch,
+      sleepFn: async () => undefined,
+      loadCompletionEvents: async () => [],
+      loadInFlightJobIds: async () => ['job-err'],
+    });
+
+    const result = await adapter.usage({
+      agreementId: 'agreement-rp-usage-err',
+      providerResourceId: 'ep_usage_err',
+    });
+
+    expect(result.status).toBe('error');
+    expect(result.usage).toEqual([]);
+    expect(result.message).toMatch(/internal error/i);
+  });
+});
+
+describe('RunPodComputeAdapter termination', () => {
+  it('terminates endpoint successfully', async () => {
+    const mockFetch: typeof fetch = async (input, init) => {
+      const url = String(input);
+      const method = (init?.method ?? 'GET').toUpperCase();
+      if (url.endsWith('/endpoints/ep_term_1') && method === 'DELETE') {
+        return makeResponse({
+          ok: true,
+          status: 200,
+          headers: { 'x-request-id': 'req-term-endpoint-1' },
+          json: { ok: true },
+        });
+      }
+      return makeResponse({ ok: false, status: 404, json: { error: 'unexpected request' } });
+    };
+
+    const adapter = new RunPodComputeAdapter({ apiKey: 'runpod-key', fetchFn: mockFetch });
+    const result = await adapter.terminate({
+      agreementId: 'agreement-rp-term-1',
+      providerResourceId: 'ep_term_1',
+      reason: 'breach',
+    });
+
+    expect(result.status).toBe('ok');
+    expect(result.terminated).toBe(true);
+    expect(result.meta).toMatchObject({ resourceType: 'endpoint', requestId: 'req-term-endpoint-1' });
+  });
+
+  it('returns idempotent success when endpoint is already deleted/not found', async () => {
+    const mockFetch: typeof fetch = async (input, init) => {
+      const url = String(input);
+      const method = (init?.method ?? 'GET').toUpperCase();
+      if (url.endsWith('/endpoints/ep_term_404') && method === 'DELETE') {
+        return makeResponse({
+          ok: false,
+          status: 404,
+          json: { error: 'not found' },
+        });
+      }
+      return makeResponse({ ok: false, status: 404, json: { error: 'unexpected request' } });
+    };
+
+    const adapter = new RunPodComputeAdapter({ apiKey: 'runpod-key', fetchFn: mockFetch });
+    const result = await adapter.terminate({
+      agreementId: 'agreement-rp-term-2',
+      providerResourceId: 'ep_term_404',
+      reason: 'default',
+    });
+
+    expect(result.status).toBe('ok');
+    expect(result.terminated).toBe(true);
+  });
+
+  it('terminates pod successfully', async () => {
+    const mockFetch: typeof fetch = async (input, init) => {
+      const url = String(input);
+      const method = (init?.method ?? 'GET').toUpperCase();
+      if (url.endsWith('/pods/pod_term_1') && method === 'DELETE') {
+        return makeResponse({
+          ok: true,
+          status: 200,
+          headers: { 'x-request-id': 'req-term-pod-1' },
+          json: { ok: true },
+        });
+      }
+      return makeResponse({ ok: false, status: 404, json: { error: 'unexpected request' } });
+    };
+
+    const adapter = new RunPodComputeAdapter({ apiKey: 'runpod-key', fetchFn: mockFetch });
+    const result = await adapter.terminate({
+      agreementId: 'agreement-rp-term-3',
+      providerResourceId: 'pod_term_1',
+      reason: 'breach',
+    });
+
+    expect(result.status).toBe('ok');
+    expect(result.terminated).toBe(true);
+    expect(result.meta).toMatchObject({ resourceType: 'pod', requestId: 'req-term-pod-1' });
+  });
+
+  it('returns idempotent success when pod is already deleted/not found', async () => {
+    const mockFetch: typeof fetch = async (input, init) => {
+      const url = String(input);
+      const method = (init?.method ?? 'GET').toUpperCase();
+      if (url.endsWith('/pods/pod_term_404') && method === 'DELETE') {
+        return makeResponse({
+          ok: false,
+          status: 404,
+          json: { error: 'object does not exist' },
+        });
+      }
+      return makeResponse({ ok: false, status: 404, json: { error: 'unexpected request' } });
+    };
+
+    const adapter = new RunPodComputeAdapter({ apiKey: 'runpod-key', fetchFn: mockFetch });
+    const result = await adapter.terminate({
+      agreementId: 'agreement-rp-term-4',
+      providerResourceId: 'pod_term_404',
+      reason: 'default',
+    });
+
+    expect(result.status).toBe('ok');
+    expect(result.terminated).toBe(true);
+  });
+
+  it('returns termination error when delete call fails', async () => {
+    const mockFetch: typeof fetch = async (input, init) => {
+      const url = String(input);
+      const method = (init?.method ?? 'GET').toUpperCase();
+      if (url.endsWith('/endpoints/ep_term_fail') && method === 'DELETE') {
+        return makeResponse({
+          ok: false,
+          status: 500,
+          headers: { 'x-request-id': 'req-term-fail-1' },
+          json: { error: 'internal failure' },
+        });
+      }
+
+      if (url.endsWith('/pods/ep_term_fail') && method === 'DELETE') {
+        return makeResponse({
+          ok: false,
+          status: 500,
+          headers: { 'x-request-id': 'req-term-fail-2' },
+          json: { error: 'internal failure' },
+        });
+      }
+
+      return makeResponse({ ok: false, status: 404, json: { error: 'unexpected request' } });
+    };
+
+    const adapter = new RunPodComputeAdapter({ apiKey: 'runpod-key', fetchFn: mockFetch, sleepFn: async () => undefined });
+    const result = await adapter.terminate({
+      agreementId: 'agreement-rp-term-5',
+      providerResourceId: 'ep_term_fail',
+      reason: 'breach',
+    });
+
+    expect(result.status).toBe('error');
+    expect(result.terminated).toBe(false);
+    expect(result.message).toMatch(/internal failure/i);
+  });
+});
