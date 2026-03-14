@@ -8,6 +8,7 @@ import { DeterministicMeteringWorker } from './metering';
 import { KillSwitchEnforcementService } from './killswitch';
 import { verifyIdentityProof } from './identity-resolver';
 import { isAddress } from 'ethers';
+import { ActivationContextResolver } from './activation-context-resolver';
 
 export type OnchainEvent = z.infer<typeof onchainEventSchema>;
 
@@ -49,7 +50,8 @@ export class OnchainEventIngestionWorker {
     private readonly meteringWorker?: DeterministicMeteringWorker,
     private readonly killSwitchService?: KillSwitchEnforcementService,
     private readonly identityGate: IdentityGateConfig = { mode: 'none' },
-    private readonly txSubmitter?: ProviderPayloadPublisher
+    private readonly txSubmitter?: ProviderPayloadPublisher,
+    private readonly activationContextResolver?: ActivationContextResolver
   ) {}
 
   async ingest(event: OnchainEvent): Promise<OnchainIngestionResult> {
@@ -151,8 +153,18 @@ export class OnchainEventIngestionWorker {
   }
 
   private async handleActivationEvent(event: OnchainEvent, eventKey: string): Promise<OnchainIngestionResult> {
-    // Canonical routing source for activation is on-chain provider from the event payload.
-    const provider = event.provider;
+    let provider = event.provider;
+    const directBorrowerAddress = this.readBorrowerAddress(event.policy, event.payload);
+    let resolvedBorrowerAddress: string | undefined;
+    let resolvedProviderId: string | undefined;
+
+    const needsActivationContext = !provider || (this.txSubmitter !== undefined && !directBorrowerAddress);
+    if (needsActivationContext && this.activationContextResolver) {
+      const context = await this.activationContextResolver.resolveActivationContext(event.agreementId);
+      provider = provider ?? context.provider;
+      resolvedBorrowerAddress = context.borrowerAddress;
+      resolvedProviderId = context.providerId;
+    }
 
     if (!provider) {
       return {
@@ -163,6 +175,7 @@ export class OnchainEventIngestionWorker {
         agreementId: event.agreementId,
         action: 'rejected',
         message: 'activation event missing canonical provider',
+        ...(resolvedProviderId ? { meta: { providerId: resolvedProviderId } } : {}),
       };
     }
 
@@ -300,7 +313,7 @@ export class OnchainEventIngestionWorker {
       | undefined;
 
     if (this.txSubmitter && provision.connection && this.isRecord(provision.connection)) {
-      const borrowerAddress = this.readBorrowerAddress(event.policy, event.payload);
+      const borrowerAddress = directBorrowerAddress ?? resolvedBorrowerAddress;
       if (!borrowerAddress) {
         providerPayloadPublish = { status: 'skipped', reason: 'missing_borrower_address' };
       } else {

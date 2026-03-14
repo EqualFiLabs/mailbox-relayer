@@ -12,6 +12,7 @@ import { ProviderEventIngress } from './provider-event-ingress';
 import { UsageSettlementService } from './settlement';
 import { createDefaultStore, MessageStore } from './store';
 import { TransactionSubmitter } from './tx-submitter';
+import { ActivationContextResolver, OnchainActivationContextResolver } from './activation-context-resolver';
 
 interface LoggerLike {
   info?: (obj: unknown, msg?: string) => void;
@@ -35,6 +36,7 @@ export interface BootstrapPhase2Result {
   providerRegistry: ComputeAdapterRegistry;
   meteringWorker: DeterministicMeteringWorker;
   killSwitchService: KillSwitchEnforcementService;
+  activationContextResolver: ActivationContextResolver;
   usageSettlementService: UsageSettlementService;
   txSubmitter: TransactionSubmitter;
   eventListener: EventListener;
@@ -95,13 +97,16 @@ export async function bootstrapPhase2(options: BootstrapPhase2Options = {}): Pro
       }
     : { mode: 'none' as const };
 
+  const activationContextResolver = new OnchainActivationContextResolver(provider, env.DIAMOND_ADDRESS);
+
   const onchainWorker = new OnchainEventIngestionWorker(
     store,
     providerRegistry,
     meteringWorker,
     killSwitchService,
     identityGate,
-    txSubmitter
+    txSubmitter,
+    activationContextResolver
   );
 
   const eventListener = new EventListener(
@@ -133,6 +138,7 @@ export async function bootstrapPhase2(options: BootstrapPhase2Options = {}): Pro
     providerRegistry,
     meteringWorker,
     killSwitchService,
+    activationContextResolver,
     usageSettlementService,
     txSubmitter,
     eventListener,

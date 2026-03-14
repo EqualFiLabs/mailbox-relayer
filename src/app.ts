@@ -17,6 +17,7 @@ import { KillSwitchEnforcementService, KillSwitchRetryScheduler } from './killsw
 import { EventListener } from './event-listener';
 import { TransactionSubmitter } from './tx-submitter';
 import { ProviderEventIngress } from './provider-event-ingress';
+import { ActivationContextResolver } from './activation-context-resolver';
 import {
   DisabledUsageSettlementSender,
   UsageSettlementScheduler,
@@ -29,6 +30,7 @@ interface BuildAppOptions {
   eventListener?: EventListener;
   txSubmitter?: TransactionSubmitter;
   providerEventIngress?: ProviderEventIngress;
+  activationContextResolver?: ActivationContextResolver;
 }
 
 function envNumber(value: string | undefined): number | undefined {
@@ -115,7 +117,8 @@ export function buildApp(
     meteringWorker,
     killSwitchService,
     options.identityGate ?? envIdentityGate(),
-    options.txSubmitter
+    options.txSubmitter,
+    options.activationContextResolver
   );
 
   if (options.providerEventIngress) {

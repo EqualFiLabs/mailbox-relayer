@@ -15,6 +15,7 @@ import {
 } from 'ethers';
 import { describe, expect, it } from 'vitest';
 import { buildApp } from '../src/app';
+import { OnchainActivationContextResolver } from '../src/activation-context-resolver';
 import { EventListener } from '../src/event-listener';
 import { OnchainEvent, OnchainEventIngestionWorker } from '../src/events';
 import { DeterministicMeteringWorker } from '../src/metering';
@@ -438,7 +439,16 @@ describe.sequential('Phase 2 Anvil integration tests', () => {
     );
 
     const meteringWorker = new DeterministicMeteringWorker(store, registry);
-    const ingestionWorker = new OnchainEventIngestionWorker(store, registry, meteringWorker, undefined, { mode: 'none' }, txSubmitter);
+    const activationResolver = new OnchainActivationContextResolver(provider, stack.diamondAddress);
+    const ingestionWorker = new OnchainEventIngestionWorker(
+      store,
+      registry,
+      meteringWorker,
+      undefined,
+      { mode: 'none' },
+      txSubmitter,
+      activationResolver
+    );
     const listener = new EventListener(
       {
         diamondAddress: stack.diamondAddress,
@@ -467,29 +477,11 @@ describe.sequential('Phase 2 Anvil integration tests', () => {
       return Boolean(cursor && cursor.lastConfirmed >= activationBlock);
     });
 
-    // Listener currently cannot infer provider from AgreementActivated logs, so we ingest
-    // a canonical activation event for provisioning and provider-link wiring.
-    const activationIngest = await ingestionWorker.ingest({
-      chainId: stack.chainId,
-      blockNumber: activationBlock,
-      logIndex: 999,
-      eventType: 'activation',
-      agreementId: agreementId.toString(),
-      provider: 'bankr',
-      txHash: '0xactivation-manual',
-    });
-    expect(activationIngest.accepted).toBe(true);
+    await waitForCondition(() => Boolean(store.getProviderLink(agreementId.toString())));
+    await txSubmitter.waitForIdle();
 
     const providerLink = store.getProviderLink(agreementId.toString());
     expect(providerLink?.provider).toBe('bankr');
-
-    const publish = await txSubmitter.publishProviderPayload(
-      agreementId.toString(),
-      { apiKey: 'bankr-live-key' },
-      stack.borrower.address
-    );
-    expect(publish.error).toBeUndefined();
-    expect(publish.txHash).toMatch(/^0x[a-fA-F0-9]{64}$/);
 
     const providerPayload = await stack.mailbox.getProviderPayload(agreementId);
     expect(typeof providerPayload).toBe('string');

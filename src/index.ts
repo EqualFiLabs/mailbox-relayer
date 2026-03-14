@@ -84,6 +84,7 @@ async function main(): Promise<void> {
     ...(phase2?.eventListener ? { eventListener: phase2.eventListener } : {}),
     ...(phase2?.txSubmitter ? { txSubmitter: phase2.txSubmitter } : {}),
     ...(phase2?.providerEventIngress ? { providerEventIngress: phase2.providerEventIngress } : {}),
+    ...(phase2?.activationContextResolver ? { activationContextResolver: phase2.activationContextResolver } : {}),
   };
 
   const app = buildApp(
