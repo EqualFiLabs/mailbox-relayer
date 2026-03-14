@@ -7,6 +7,7 @@ import {
   UsageRequest,
   UsageResult,
 } from './types';
+import { resolveCanonicalUnitType } from './unit-types';
 
 type FetchLike = typeof fetch;
 
@@ -207,22 +208,220 @@ export class LambdaComputeAdapter implements ComputeProviderAdapter {
   }
 
   async usage(request: UsageRequest): Promise<UsageResult> {
+    if (!this.apiKey) {
+      return {
+        status: 'error',
+        provider: this.provider,
+        usage: [],
+        message: 'LAMBDA_API_KEY not configured',
+        meta: { agreementId: request.agreementId, providerResourceId: request.providerResourceId },
+      };
+    }
+
+    if (!request.providerResourceId) {
+      return {
+        status: 'error',
+        provider: this.provider,
+        usage: [],
+        message: 'providerResourceId is required for Lambda usage',
+        meta: { agreementId: request.agreementId },
+      };
+    }
+
+    const instance = await this.request<Record<string, unknown>>(
+      'GET',
+      `/instances/${encodeURIComponent(request.providerResourceId)}`
+    );
+
+    if (!instance.ok) {
+      return {
+        status: 'error',
+        provider: this.provider,
+        usage: [],
+        message: instance.error,
+        meta: {
+          agreementId: request.agreementId,
+          providerResourceId: request.providerResourceId,
+          statusCode: instance.statusCode,
+          requestId: instance.requestId,
+          errorBody: instance.errorBody,
+        },
+      };
+    }
+
+    const instanceStatus = (this.readString(instance.data, ['status']) ?? 'unknown').toLowerCase();
+    const launchTimeMs = this.readTimestamp(instance.data, [
+      'launch_time',
+      'launchTime',
+      'launched_at',
+      'launchedAt',
+      'created_at',
+      'createdAt',
+      'created',
+    ]);
+
+    if (launchTimeMs === undefined) {
+      return {
+        status: 'error',
+        provider: this.provider,
+        usage: [],
+        message: 'Lambda instance response missing launch_time',
+        meta: {
+          agreementId: request.agreementId,
+          providerResourceId: request.providerResourceId,
+          requestId: instance.requestId,
+        },
+      };
+    }
+
+    const fromMs = request.from ? this.parseTimestampString(request.from) : undefined;
+    if (request.from && fromMs === undefined) {
+      return {
+        status: 'error',
+        provider: this.provider,
+        usage: [],
+        message: 'invalid from timestamp',
+        meta: { agreementId: request.agreementId, providerResourceId: request.providerResourceId },
+      };
+    }
+
+    const toMs = request.to ? this.parseTimestampString(request.to) : undefined;
+    if (request.to && toMs === undefined) {
+      return {
+        status: 'error',
+        provider: this.provider,
+        usage: [],
+        message: 'invalid to timestamp',
+        meta: { agreementId: request.agreementId, providerResourceId: request.providerResourceId },
+      };
+    }
+
+    const instanceType = this.readInstanceType(instance.data);
+    if (!instanceType) {
+      return {
+        status: 'error',
+        provider: this.provider,
+        usage: [],
+        message: 'unsupported_instance_type',
+        meta: {
+          agreementId: request.agreementId,
+          providerResourceId: request.providerResourceId,
+          instanceStatus,
+          requestId: instance.requestId,
+        },
+      };
+    }
+
+    const unitType = resolveCanonicalUnitType('lambda', instanceType);
+    if (!unitType) {
+      return {
+        status: 'error',
+        provider: this.provider,
+        usage: [],
+        message: 'unsupported_instance_type',
+        meta: {
+          agreementId: request.agreementId,
+          providerResourceId: request.providerResourceId,
+          instanceType,
+          instanceStatus,
+          requestId: instance.requestId,
+        },
+      };
+    }
+
+    const nowMs = Date.now();
+    const requestedEndMs = toMs ?? nowMs;
+    let endMs = Math.min(requestedEndMs, nowMs);
+
+    if (this.isNonRunningStatus(instanceStatus)) {
+      const stopTimeMs = this.readTimestamp(instance.data, [
+        'terminated_at',
+        'terminatedAt',
+        'stopped_at',
+        'stoppedAt',
+        'ended_at',
+        'endedAt',
+        'updated_at',
+        'updatedAt',
+      ]);
+      if (stopTimeMs !== undefined) {
+        endMs = Math.min(endMs, stopTimeMs);
+      }
+    }
+
+    const startMs = Math.max(fromMs ?? launchTimeMs, launchTimeMs);
+    const elapsedHours = Math.max(0, endMs - startMs) / 3_600_000;
+    const observedAt = new Date(endMs).toISOString();
+
     return {
-      status: 'not_implemented',
+      status: 'ok',
       provider: this.provider,
-      usage: [],
-      message: 'Lambda usage metering adapter is scaffolded but not yet implemented.',
-      meta: { agreementId: request.agreementId, providerResourceId: request.providerResourceId },
+      usage: [{ unitType, amount: elapsedHours.toFixed(18), observedAt }],
+      meta: {
+        agreementId: request.agreementId,
+        providerResourceId: request.providerResourceId,
+        instanceStatus,
+        instanceType,
+        launchTime: new Date(launchTimeMs).toISOString(),
+        requestId: instance.requestId,
+      },
     };
   }
 
   async terminate(request: TerminateRequest): Promise<TerminateResult> {
+    if (!this.apiKey) {
+      return {
+        status: 'error',
+        provider: this.provider,
+        terminated: false,
+        message: 'LAMBDA_API_KEY not configured',
+        meta: { agreementId: request.agreementId, providerResourceId: request.providerResourceId, reason: request.reason },
+      };
+    }
+
+    if (!request.providerResourceId) {
+      return {
+        status: 'error',
+        provider: this.provider,
+        terminated: false,
+        message: 'providerResourceId is required for Lambda termination',
+        meta: { agreementId: request.agreementId, reason: request.reason },
+      };
+    }
+
+    const terminated = await this.request<unknown>('POST', '/instance-operations/terminate', {
+      body: {
+        instance_ids: [request.providerResourceId],
+      },
+    });
+
+    if (terminated.ok || this.isTerminateIdempotentError(terminated.error, terminated.statusCode)) {
+      return {
+        status: 'ok',
+        provider: this.provider,
+        terminated: true,
+        meta: {
+          agreementId: request.agreementId,
+          providerResourceId: request.providerResourceId,
+          reason: request.reason,
+          requestId: terminated.requestId,
+        },
+      };
+    }
+
     return {
-      status: 'not_implemented',
+      status: 'error',
       provider: this.provider,
       terminated: false,
-      message: 'Lambda terminate adapter is scaffolded but not yet implemented.',
-      meta: { agreementId: request.agreementId, providerResourceId: request.providerResourceId, reason: request.reason },
+      message: terminated.error,
+      meta: {
+        agreementId: request.agreementId,
+        providerResourceId: request.providerResourceId,
+        reason: request.reason,
+        statusCode: terminated.statusCode,
+        requestId: terminated.requestId,
+        errorBody: terminated.errorBody,
+      },
     };
   }
 
@@ -426,5 +625,43 @@ export class LambdaComputeAdapter implements ComputeProviderAdapter {
       }
     }
     return [];
+  }
+
+  private parseTimestampString(value: string): number | undefined {
+    const parsed = Date.parse(value);
+    return Number.isNaN(parsed) ? undefined : parsed;
+  }
+
+  private readTimestamp(value: Record<string, unknown> | undefined, keys: string[]): number | undefined {
+    if (!value) return undefined;
+
+    for (const key of keys) {
+      const candidate = value[key];
+      if (typeof candidate === 'string') {
+        const parsed = this.parseTimestampString(candidate);
+        if (parsed !== undefined) return parsed;
+      } else if (typeof candidate === 'number' && Number.isFinite(candidate)) {
+        return candidate > 1e12 ? candidate : candidate * 1000;
+      }
+    }
+
+    return undefined;
+  }
+
+  private readInstanceType(instance: Record<string, unknown>): string | undefined {
+    const direct = this.readString(instance, ['instance_type_name', 'instanceTypeName', 'instanceType']);
+    if (direct) return direct;
+
+    const nestedType = this.toRecord(instance.instance_type) ?? this.toRecord(instance.instanceType);
+    return this.readString(nestedType, ['name', 'instance_type_name', 'instanceTypeName']);
+  }
+
+  private isNonRunningStatus(status: string): boolean {
+    return ['terminated', 'terminating', 'preempted', 'unhealthy', 'error'].includes(status);
+  }
+
+  private isTerminateIdempotentError(error: string, statusCode?: number): boolean {
+    if (statusCode === 404) return true;
+    return /already terminated|not found|does not exist|object-does-not-exist/i.test(error);
   }
 }

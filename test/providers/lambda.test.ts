@@ -409,3 +409,229 @@ describe('LambdaComputeAdapter provisioning', () => {
     expect(launchBodies[0].name).toBe(`equalfi-${agreementId}`);
   });
 });
+
+describe('LambdaComputeAdapter usage metering', () => {
+  it('computes usage for a running instance over a bounded window', async () => {
+    const mockFetch: typeof fetch = async (input) => {
+      const url = String(input);
+
+      if (url.endsWith('/instances/i-run-1')) {
+        return makeResponse({
+          ok: true,
+          status: 200,
+          headers: { 'x-request-id': 'req-usage-running' },
+          json: {
+            data: {
+              id: 'i-run-1',
+              status: 'active',
+              launch_time: '2026-03-12T10:00:00.000Z',
+              instance_type_name: 'gpu_1x_a100',
+            },
+          },
+        });
+      }
+
+      return makeResponse({ ok: false, status: 404, json: { error: { message: 'unexpected request' } } });
+    };
+
+    const adapter = new LambdaComputeAdapter({ apiKey: 'lambda-key', fetchFn: mockFetch });
+    const result = await adapter.usage({
+      agreementId: 'agreement-usage-1',
+      providerResourceId: 'i-run-1',
+      from: '2026-03-12T10:30:00.000Z',
+      to: '2026-03-12T12:00:00.000Z',
+    });
+
+    expect(result.status).toBe('ok');
+    expect(result.usage).toHaveLength(1);
+    expect(result.usage[0]).toMatchObject({
+      unitType: 'GPU_HOUR_A100',
+      amount: '1.500000000000000000',
+      observedAt: '2026-03-12T12:00:00.000Z',
+    });
+  });
+
+  it('computes usage up to termination time for terminated instances', async () => {
+    const mockFetch: typeof fetch = async (input) => {
+      const url = String(input);
+
+      if (url.endsWith('/instances/i-term-1')) {
+        return makeResponse({
+          ok: true,
+          status: 200,
+          json: {
+            data: {
+              id: 'i-term-1',
+              status: 'terminated',
+              launch_time: '2026-03-12T10:00:00.000Z',
+              terminated_at: '2026-03-12T11:00:00.000Z',
+              instance_type_name: 'gpu_1x_h100_pcie',
+            },
+          },
+        });
+      }
+
+      return makeResponse({ ok: false, status: 404, json: { error: { message: 'unexpected request' } } });
+    };
+
+    const adapter = new LambdaComputeAdapter({ apiKey: 'lambda-key', fetchFn: mockFetch });
+    const result = await adapter.usage({
+      agreementId: 'agreement-usage-2',
+      providerResourceId: 'i-term-1',
+      from: '2026-03-12T09:00:00.000Z',
+      to: '2026-03-12T12:00:00.000Z',
+    });
+
+    expect(result.status).toBe('ok');
+    expect(result.usage).toHaveLength(1);
+    expect(result.usage[0]).toMatchObject({
+      unitType: 'GPU_HOUR_H100',
+      amount: '1.000000000000000000',
+      observedAt: '2026-03-12T11:00:00.000Z',
+    });
+    expect(result.meta?.instanceStatus).toBe('terminated');
+  });
+
+  it('returns error when instance lookup fails', async () => {
+    const mockFetch: typeof fetch = async (input) => {
+      const url = String(input);
+      if (url.endsWith('/instances/i-missing-1')) {
+        return makeResponse({
+          ok: false,
+          status: 404,
+          json: { error: { message: 'object does not exist' } },
+        });
+      }
+      return makeResponse({ ok: false, status: 404, json: { error: { message: 'unexpected request' } } });
+    };
+
+    const adapter = new LambdaComputeAdapter({ apiKey: 'lambda-key', fetchFn: mockFetch });
+    const result = await adapter.usage({
+      agreementId: 'agreement-usage-3',
+      providerResourceId: 'i-missing-1',
+    });
+
+    expect(result.status).toBe('error');
+    expect(result.usage).toEqual([]);
+    expect(result.message).toMatch(/does not exist|http 404/i);
+  });
+
+  it('maps instance type to canonical unit type in usage output', async () => {
+    const mockFetch: typeof fetch = async (input) => {
+      const url = String(input);
+
+      if (url.endsWith('/instances/i-map-1')) {
+        return makeResponse({
+          ok: true,
+          status: 200,
+          json: {
+            data: {
+              id: 'i-map-1',
+              status: 'active',
+              launch_time: '2026-03-12T10:00:00.000Z',
+              instance_type: { name: 'gpu_1x_a10' },
+            },
+          },
+        });
+      }
+
+      return makeResponse({ ok: false, status: 404, json: { error: { message: 'unexpected request' } } });
+    };
+
+    const adapter = new LambdaComputeAdapter({ apiKey: 'lambda-key', fetchFn: mockFetch });
+    const result = await adapter.usage({
+      agreementId: 'agreement-usage-4',
+      providerResourceId: 'i-map-1',
+      from: '2026-03-12T10:00:00.000Z',
+      to: '2026-03-12T11:00:00.000Z',
+    });
+
+    expect(result.status).toBe('ok');
+    expect(result.usage[0].unitType).toBe('GPU_HOUR_A10');
+  });
+});
+
+describe('LambdaComputeAdapter termination', () => {
+  it('terminates instance successfully', async () => {
+    const mockFetch: typeof fetch = async (input, init) => {
+      const url = String(input);
+      const method = (init?.method ?? 'GET').toUpperCase();
+      if (url.endsWith('/instance-operations/terminate') && method === 'POST') {
+        return makeResponse({
+          ok: true,
+          status: 200,
+          headers: { 'x-request-id': 'req-terminate-ok' },
+          json: { data: { terminated_instances: [{ id: 'i-term-ok-1' }] } },
+        });
+      }
+      return makeResponse({ ok: false, status: 404, json: { error: { message: 'unexpected request' } } });
+    };
+
+    const adapter = new LambdaComputeAdapter({ apiKey: 'lambda-key', fetchFn: mockFetch });
+    const result = await adapter.terminate({
+      agreementId: 'agreement-term-1',
+      providerResourceId: 'i-term-ok-1',
+      reason: 'breach',
+    });
+
+    expect(result.status).toBe('ok');
+    expect(result.terminated).toBe(true);
+    expect(result.meta).toMatchObject({
+      agreementId: 'agreement-term-1',
+      providerResourceId: 'i-term-ok-1',
+      reason: 'breach',
+      requestId: 'req-terminate-ok',
+    });
+  });
+
+  it('returns idempotent success when instance is already terminated or not found', async () => {
+    const mockFetch: typeof fetch = async (input, init) => {
+      const url = String(input);
+      const method = (init?.method ?? 'GET').toUpperCase();
+      if (url.endsWith('/instance-operations/terminate') && method === 'POST') {
+        return makeResponse({
+          ok: false,
+          status: 404,
+          json: { error: { message: 'object does not exist' } },
+        });
+      }
+      return makeResponse({ ok: false, status: 404, json: { error: { message: 'unexpected request' } } });
+    };
+
+    const adapter = new LambdaComputeAdapter({ apiKey: 'lambda-key', fetchFn: mockFetch });
+    const result = await adapter.terminate({
+      agreementId: 'agreement-term-2',
+      providerResourceId: 'i-term-ok-2',
+      reason: 'default',
+    });
+
+    expect(result.status).toBe('ok');
+    expect(result.terminated).toBe(true);
+  });
+
+  it('returns error when terminate API call fails', async () => {
+    const mockFetch: typeof fetch = async (input, init) => {
+      const url = String(input);
+      const method = (init?.method ?? 'GET').toUpperCase();
+      if (url.endsWith('/instance-operations/terminate') && method === 'POST') {
+        return makeResponse({
+          ok: false,
+          status: 400,
+          json: { error: { message: 'invalid parameters' } },
+        });
+      }
+      return makeResponse({ ok: false, status: 404, json: { error: { message: 'unexpected request' } } });
+    };
+
+    const adapter = new LambdaComputeAdapter({ apiKey: 'lambda-key', fetchFn: mockFetch });
+    const result = await adapter.terminate({
+      agreementId: 'agreement-term-3',
+      providerResourceId: 'i-term-fail-1',
+      reason: 'breach',
+    });
+
+    expect(result.status).toBe('error');
+    expect(result.terminated).toBe(false);
+    expect(result.message).toMatch(/invalid parameters/i);
+  });
+});
