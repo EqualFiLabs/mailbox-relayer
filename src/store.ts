@@ -39,7 +39,8 @@ export type AgreementState =
   | 'activation_failed'
   | 'mailbox_received'
   | 'breach_detected'
-  | 'default_detected';
+  | 'default_detected'
+  | 'closed';
 
 export interface AgreementStateRecord {
   agreementId: string;

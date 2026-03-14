@@ -62,8 +62,10 @@ export class OnchainEventIngestionWorker {
       result = await this.handleMailboxEvent(event, eventKey);
     } else if (event.eventType === 'activation') {
       result = await this.handleActivationEvent(event, eventKey);
+    } else if (event.eventType === 'agreement_closed') {
+      result = this.handleAgreementClosedEvent(event, eventKey);
     } else {
-      result = await this.handleBreachOrDefaultEvent(event, eventKey);
+      result = await this.handleRiskEvent(event, eventKey);
     }
 
     // Persist dedupe marker only after a successful acceptance path.
@@ -281,9 +283,23 @@ export class OnchainEventIngestionWorker {
     };
   }
 
-  private async handleBreachOrDefaultEvent(event: OnchainEvent, eventKey: string): Promise<OnchainIngestionResult> {
+  private async handleRiskEvent(event: OnchainEvent, eventKey: string): Promise<OnchainIngestionResult> {
+    const normalized = this.normalizeRiskEventType(event.eventType);
+    if (!normalized) {
+      return {
+        accepted: false,
+        deduped: false,
+        eventKey,
+        eventType: event.eventType,
+        agreementId: event.agreementId,
+        ...(event.provider ? { provider: event.provider } : {}),
+        action: 'rejected',
+        message: 'unsupported_event_type',
+      };
+    }
+
     const provider = event.provider ?? this.store.getProviderLink(event.agreementId)?.provider;
-    const state = event.eventType === 'breach' ? 'breach_detected' : 'default_detected';
+    const state = normalized === 'breach' ? 'breach_detected' : 'default_detected';
 
     const finalMetering = this.meteringWorker
       ? await this.meteringWorker.runForAgreement(event.agreementId, { finalPass: true })
@@ -294,7 +310,7 @@ export class OnchainEventIngestionWorker {
     if (this.killSwitchService) {
       const ks = await this.killSwitchService.enforce({
         agreementId: event.agreementId,
-        eventType: event.eventType as 'breach' | 'default',
+        eventType: normalized,
         ...(event.reason ? { reason: event.reason } : {}),
         ...(provider ? { provider } : {}),
         sourceEventKey: eventKey,
@@ -391,6 +407,32 @@ export class OnchainEventIngestionWorker {
       },
       ...(terminated.message ? { message: terminated.message } : {}),
     };
+  }
+
+  private handleAgreementClosedEvent(event: OnchainEvent, eventKey: string): OnchainIngestionResult {
+    this.store.setAgreementState(this.toStateRecord(event.agreementId, 'closed', event.traceId));
+
+    return {
+      accepted: true,
+      deduped: false,
+      eventKey,
+      eventType: event.eventType,
+      agreementId: event.agreementId,
+      ...(event.provider ? { provider: event.provider } : {}),
+      action: 'agreement_closed_recorded',
+    };
+  }
+
+  private normalizeRiskEventType(
+    eventType: OnchainEvent['eventType']
+  ): 'breach' | 'default' | undefined {
+    if (eventType === 'breach' || eventType === 'risk_covenant_breached' || eventType === 'risk_draw_terminated') {
+      return 'breach';
+    }
+    if (eventType === 'default' || eventType === 'risk_defaulted') {
+      return 'default';
+    }
+    return undefined;
   }
 
   private toStateRecord(
