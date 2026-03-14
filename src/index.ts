@@ -11,6 +11,9 @@ import {
 } from './settlement';
 import { AlertingService, DisabledAlertSender, WebhookAlertSender } from './alerting';
 import { bootstrapPhase2 } from './bootstrap-phase2';
+import { InterestAccrualScheduler, InterestAccrualService } from './interest-accrual';
+import { CovenantMonitorScheduler, CovenantMonitorService } from './covenant-monitor';
+import { JsonRpcProvider, Wallet } from 'ethers';
 
 function phase2ConfigMode(): 'disabled' | 'partial' | 'enabled' {
   const required = ['RPC_URL', 'DIAMOND_ADDRESS', 'CHAIN_ID', 'RELAYER_PRIVATE_KEY'];
@@ -80,6 +83,56 @@ async function main(): Promise<void> {
     usageSettlementScheduler.start();
   }
 
+  const covenantMonitorEnabled = process.env.COVENANT_MONITOR_ENABLED === 'true';
+  const covenantMonitorIntervalMs = Number(process.env.COVENANT_MONITOR_INTERVAL_MS ?? '900000');
+  const covenantFacetAddress = process.env.COVENANT_FACET_ADDRESS ?? process.env.DIAMOND_ADDRESS;
+  let covenantMonitorScheduler: CovenantMonitorScheduler | undefined;
+  if (
+    covenantMonitorEnabled &&
+    process.env.RPC_URL &&
+    process.env.RELAYER_PRIVATE_KEY &&
+    covenantFacetAddress
+  ) {
+    const provider = new JsonRpcProvider(process.env.RPC_URL);
+    const signer = new Wallet(process.env.RELAYER_PRIVATE_KEY, provider);
+    const service = new CovenantMonitorService(store, provider, signer, covenantFacetAddress, {
+      logger: console,
+    });
+    covenantMonitorScheduler = new CovenantMonitorScheduler(service, covenantMonitorIntervalMs);
+    covenantMonitorScheduler.start();
+  } else if (covenantMonitorEnabled) {
+    // eslint-disable-next-line no-console
+    console.warn(
+      '[covenant-monitor] scheduler enabled but missing one of RPC_URL, RELAYER_PRIVATE_KEY, or COVENANT_FACET_ADDRESS/DIAMOND_ADDRESS'
+    );
+  }
+
+  const interestAccrualEnabled = process.env.INTEREST_ACCRUAL_ENABLED === 'true';
+  const interestAccrualIntervalMs = Number(process.env.INTEREST_ACCRUAL_INTERVAL_MS ?? '3600000');
+  const interestAccrualThresholdSeconds = Number(process.env.INTEREST_ACCRUAL_THRESHOLD_SECONDS ?? '3600');
+  const interestFacetAddress = process.env.INTEREST_FACET_ADDRESS ?? process.env.DIAMOND_ADDRESS;
+  let interestAccrualScheduler: InterestAccrualScheduler | undefined;
+  if (
+    interestAccrualEnabled &&
+    process.env.RPC_URL &&
+    process.env.RELAYER_PRIVATE_KEY &&
+    interestFacetAddress
+  ) {
+    const provider = new JsonRpcProvider(process.env.RPC_URL);
+    const signer = new Wallet(process.env.RELAYER_PRIVATE_KEY, provider);
+    const service = new InterestAccrualService(store, provider, signer, interestFacetAddress, {
+      accrualThresholdSeconds: interestAccrualThresholdSeconds,
+      logger: console,
+    });
+    interestAccrualScheduler = new InterestAccrualScheduler(service, interestAccrualIntervalMs);
+    interestAccrualScheduler.start();
+  } else if (interestAccrualEnabled) {
+    // eslint-disable-next-line no-console
+    console.warn(
+      '[interest-accrual] scheduler enabled but missing one of RPC_URL, RELAYER_PRIVATE_KEY, or INTEREST_FACET_ADDRESS/DIAMOND_ADDRESS'
+    );
+  }
+
   const buildOptions = {
     ...(phase2?.eventListener ? { eventListener: phase2.eventListener } : {}),
     ...(phase2?.txSubmitter ? { txSubmitter: phase2.txSubmitter } : {}),
@@ -103,6 +156,8 @@ async function main(): Promise<void> {
     meteringScheduler.stop();
     killSwitchRetryScheduler.stop();
     usageSettlementScheduler.stop();
+    covenantMonitorScheduler?.stop();
+    interestAccrualScheduler?.stop();
   });
 
   const port = Number(process.env.PORT ?? '3000');

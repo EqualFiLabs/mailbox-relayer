@@ -139,6 +139,7 @@ export interface MessageStore {
 
   setAgreementState(record: AgreementStateRecord): void;
   getAgreementState(agreementId: string): AgreementStateRecord | undefined;
+  listAgreementStates(state?: AgreementState, limit?: number): AgreementStateRecord[];
 
   setKillSwitch(record: KillSwitchRecord): void;
   getKillSwitch(agreementId: string): KillSwitchRecord | undefined;
@@ -321,6 +322,14 @@ export class InMemoryMessageStore implements MessageStore {
 
   getAgreementState(agreementId: string): AgreementStateRecord | undefined {
     return this.agreementStates.get(agreementId);
+  }
+
+  listAgreementStates(state?: AgreementState, limit = 200): AgreementStateRecord[] {
+    const records = [...this.agreementStates.values()];
+    return records
+      .filter((record) => !state || record.state === state)
+      .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
+      .slice(0, limit);
   }
 
   setKillSwitch(record: KillSwitchRecord): void {
@@ -1023,6 +1032,44 @@ export class SQLiteMessageStore implements MessageStore {
       ...(row.trace_id ? { traceId: row.trace_id } : {}),
       updatedAt: row.updated_at,
     };
+  }
+
+  listAgreementStates(state?: AgreementState, limit = 200): AgreementStateRecord[] {
+    const rows = state
+      ? (this.db
+          .prepare(
+            `SELECT agreement_id, state, trace_id, updated_at
+             FROM agreement_states
+             WHERE state = ?
+             ORDER BY updated_at DESC
+             LIMIT ?`
+          )
+          .all(state, limit) as Array<{
+          agreement_id: string;
+          state: AgreementState;
+          trace_id: string | null;
+          updated_at: string;
+        }>)
+      : (this.db
+          .prepare(
+            `SELECT agreement_id, state, trace_id, updated_at
+             FROM agreement_states
+             ORDER BY updated_at DESC
+             LIMIT ?`
+          )
+          .all(limit) as Array<{
+          agreement_id: string;
+          state: AgreementState;
+          trace_id: string | null;
+          updated_at: string;
+        }>);
+
+    return rows.map((row) => ({
+      agreementId: row.agreement_id,
+      state: row.state,
+      ...(row.trace_id ? { traceId: row.trace_id } : {}),
+      updatedAt: row.updated_at,
+    }));
   }
 
   setKillSwitch(record: KillSwitchRecord): void {
