@@ -60,13 +60,19 @@ Scaffolded provider adapter contracts live in `src/providers/`:
 Current status:
 - `venice` adapter has a live HTTP implementation scaffold (key create, paginated usage read, revoke flow)
 - `bankr` adapter is implemented (provisioning, usage normalization, soft-kill terminate path)
+- `lambda` adapter is implemented (provisioning, usage metering, termination)
+- `runpod` adapter is implemented (serverless + dedicated provisioning, usage metering, termination)
 - Venice metering fails closed: unmappable/invalid usage rows are quarantined and surfaced as errors
-- `lambda` and `runpod` remain stubbed
 
 Environment variables:
 
 - `VENICE_API_KEY` (required for live Venice operations)
 - `VENICE_BASE_URL` (optional, default `https://api.venice.ai/api/v1`)
+- `LAMBDA_API_KEY` (required for live Lambda operations)
+- `LAMBDA_BASE_URL` (optional, default `https://cloud.lambdalabs.com/api/v1`)
+- `RUNPOD_API_KEY` (required for live RunPod operations)
+- `RUNPOD_SERVERLESS_BASE_URL` (optional, default `https://api.runpod.ai/v2`)
+- `RUNPOD_INFRA_BASE_URL` (optional, default `https://rest.runpod.io/v1`)
 - `BANKR_LLM_KEY` (optional fallback Bankr key; required when no key-pool source is configured)
 - `BANKR_LLM_BASE_URL` (optional, default `https://llm.bankr.bot`)
 - `BANKR_USAGE_PATH` (optional, default `/usage`)

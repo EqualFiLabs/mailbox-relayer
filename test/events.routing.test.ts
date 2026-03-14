@@ -46,9 +46,13 @@ describe('activation provider routing', () => {
 
   const store = new InMemoryMessageStore();
   const registry = new ComputeAdapterRegistry();
+  const lambdaAdapter = new SpyAdapter('lambda');
+  const runpodAdapter = new SpyAdapter('runpod');
   const veniceAdapter = new SpyAdapter('venice');
   const bankrAdapter = new SpyAdapter('bankr');
 
+  registry.register(lambdaAdapter);
+  registry.register(runpodAdapter);
   registry.register(veniceAdapter);
   registry.register(bankrAdapter);
 
@@ -127,5 +131,43 @@ describe('activation provider routing', () => {
 
     expect(veniceAdapter.provisionCalls).toHaveLength(1);
     expect(bankrAdapter.provisionCalls).toHaveLength(0);
+  });
+
+  it('routes activation using compute policy when computeMode is present', async () => {
+    const agreementId = 'agreement-routing-policy-1';
+    const previousLambdaCalls = lambdaAdapter.provisionCalls.length;
+    const previousRunPodCalls = runpodAdapter.provisionCalls.length;
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/events/onchain',
+      headers: adminHeaders,
+      payload: {
+        chainId: 84532,
+        blockNumber: 1400,
+        logIndex: 3,
+        eventType: 'activation',
+        agreementId,
+        provider: 'runpod',
+        policy: {
+          computeMode: 'dedicated',
+          instanceType: 'h100_80gb',
+        },
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    const body = response.json();
+    expect(body.results[0].action).toBe('activation_processed');
+    expect(body.results[0].provider).toBe('runpod');
+    expect(body.results[0].meta.providerResultStatus).toBe('ok');
+    expect(body.results[0].meta.providerResourceId).toBe(`lambda-resource-${agreementId}`);
+
+    expect(lambdaAdapter.provisionCalls).toHaveLength(previousLambdaCalls + 1);
+    expect(runpodAdapter.provisionCalls).toHaveLength(previousRunPodCalls);
+
+    const link = store.getProviderLink(agreementId);
+    expect(link?.provider).toBe('runpod');
+    expect(link?.providerResourceId).toBe(`lambda-resource-${agreementId}`);
   });
 });

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { ComputeAdapterRegistry } from '../../src/providers/registry';
+import { ComputeAdapterRegistry, createDefaultComputeAdapterRegistry } from '../../src/providers/registry';
 import { ComputePolicy } from '../../src/providers/policy';
 import {
   ComputeProvider,
@@ -112,5 +112,42 @@ describe('ComputeAdapterRegistry routing and circuit-breaker', () => {
       resolvedProvider: 'bankr',
       routeSource: 'provider',
     });
+  });
+});
+
+describe('createDefaultComputeAdapterRegistry env wiring', () => {
+  it('passes Lambda and RunPod env config into default adapter construction', () => {
+    const previousEnv = {
+      LAMBDA_API_KEY: process.env.LAMBDA_API_KEY,
+      LAMBDA_BASE_URL: process.env.LAMBDA_BASE_URL,
+      RUNPOD_API_KEY: process.env.RUNPOD_API_KEY,
+      RUNPOD_SERVERLESS_BASE_URL: process.env.RUNPOD_SERVERLESS_BASE_URL,
+      RUNPOD_INFRA_BASE_URL: process.env.RUNPOD_INFRA_BASE_URL,
+    };
+
+    process.env.LAMBDA_API_KEY = 'lambda-env-key';
+    process.env.LAMBDA_BASE_URL = 'https://lambda.env.local/v1';
+    process.env.RUNPOD_API_KEY = 'runpod-env-key';
+    process.env.RUNPOD_SERVERLESS_BASE_URL = 'https://serverless.env.local/v2';
+    process.env.RUNPOD_INFRA_BASE_URL = 'https://infra.env.local/v1';
+
+    try {
+      const registry = createDefaultComputeAdapterRegistry();
+
+      const lambdaAdapter = registry.get('lambda') as unknown as Record<string, unknown> | undefined;
+      const runpodAdapter = registry.get('runpod') as unknown as Record<string, unknown> | undefined;
+
+      expect(lambdaAdapter?.apiKey).toBe('lambda-env-key');
+      expect(lambdaAdapter?.baseUrl).toBe('https://lambda.env.local/v1');
+      expect(runpodAdapter?.apiKey).toBe('runpod-env-key');
+      expect(runpodAdapter?.serverlessBaseUrl).toBe('https://serverless.env.local/v2');
+      expect(runpodAdapter?.infraBaseUrl).toBe('https://infra.env.local/v1');
+    } finally {
+      process.env.LAMBDA_API_KEY = previousEnv.LAMBDA_API_KEY;
+      process.env.LAMBDA_BASE_URL = previousEnv.LAMBDA_BASE_URL;
+      process.env.RUNPOD_API_KEY = previousEnv.RUNPOD_API_KEY;
+      process.env.RUNPOD_SERVERLESS_BASE_URL = previousEnv.RUNPOD_SERVERLESS_BASE_URL;
+      process.env.RUNPOD_INFRA_BASE_URL = previousEnv.RUNPOD_INFRA_BASE_URL;
+    }
   });
 });

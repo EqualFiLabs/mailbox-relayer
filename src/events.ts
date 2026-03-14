@@ -3,7 +3,7 @@ import { z } from 'zod';
 import { onchainEventSchema } from './schema';
 import { AgreementStateRecord, MessageStore, ProviderResourceLink } from './store';
 import { StoredMessage } from './types';
-import { ComputeAdapterRegistry, ComputeProvider } from './providers';
+import { ComputeAdapterRegistry, ComputePolicy, ComputeProvider } from './providers';
 import { DeterministicMeteringWorker } from './metering';
 import { KillSwitchEnforcementService } from './killswitch';
 import { verifyIdentityProof } from './identity-resolver';
@@ -222,7 +222,17 @@ export class OnchainEventIngestionWorker {
       };
     }
 
-    const adapter = this.providers.get(provider);
+    const routingPolicy = this.toRoutingPolicy(event.policy, event.agreementId);
+    const adapter = routingPolicy ? this.providers.resolve(routingPolicy) : this.providers.get(provider);
+
+    this.logActivationRoutingDecision({
+      agreementId: event.agreementId,
+      canonicalProvider: provider,
+      policyProvider: routingPolicy?.provider ?? null,
+      computeMode: routingPolicy?.computeMode ?? null,
+      resolvedProvider: adapter?.provider ?? null,
+      routeSource: routingPolicy ? 'policy' : 'provider_fallback',
+    });
 
     if (!adapter) {
       return {
@@ -588,6 +598,44 @@ export class OnchainEventIngestionWorker {
       }
     }
     return undefined;
+  }
+
+  private toRoutingPolicy(policy: Record<string, unknown> | undefined, agreementId: string): ComputePolicy | undefined {
+    if (!policy) return undefined;
+
+    const provider = this.readProviderFromRecord(policy);
+    const computeMode = this.readComputeModeFromRecord(policy);
+    if (!provider && !computeMode) {
+      return undefined;
+    }
+
+    return {
+      ...policy,
+      ...(provider ? { provider } : {}),
+      ...(computeMode ? { computeMode } : {}),
+      agreementId,
+    } as ComputePolicy;
+  }
+
+  private readComputeModeFromRecord(record?: Record<string, unknown>): ComputePolicy['computeMode'] | undefined {
+    if (!record) return undefined;
+    const value = record.computeMode;
+    return this.isComputeMode(value) ? value : undefined;
+  }
+
+  private isComputeMode(value: unknown): value is NonNullable<ComputePolicy['computeMode']> {
+    return value === 'dedicated' || value === 'burst' || value === 'api_inference';
+  }
+
+  private logActivationRoutingDecision(payload: {
+    agreementId: string;
+    canonicalProvider: ComputeProvider;
+    policyProvider: ComputeProvider | null;
+    computeMode: ComputePolicy['computeMode'] | null;
+    resolvedProvider: ComputeProvider | null;
+    routeSource: 'policy' | 'provider_fallback';
+  }): void {
+    console.info('activation adapter routing decision', payload);
   }
 
   private isComputeProvider(value: unknown): value is ComputeProvider {

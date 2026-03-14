@@ -71,8 +71,19 @@ export class ComputeAdapterRegistry {
 
 export function createDefaultComputeAdapterRegistry(): ComputeAdapterRegistry {
   const registry = new ComputeAdapterRegistry();
-  registry.register(new LambdaComputeAdapter());
-  registry.register(new RunPodComputeAdapter());
+  registry.register(
+    new LambdaComputeAdapter({
+      apiKey: process.env.LAMBDA_API_KEY,
+      baseUrl: process.env.LAMBDA_BASE_URL,
+    })
+  );
+  registry.register(
+    new RunPodComputeAdapter({
+      apiKey: process.env.RUNPOD_API_KEY,
+      serverlessBaseUrl: process.env.RUNPOD_SERVERLESS_BASE_URL,
+      infraBaseUrl: process.env.RUNPOD_INFRA_BASE_URL,
+    })
+  );
   registry.register(new VeniceComputeAdapter());
   registry.register(new BankrComputeAdapter());
   return registry;
