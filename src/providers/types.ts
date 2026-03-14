@@ -13,6 +13,7 @@ export interface ProvisionResult {
   status: AdapterResultStatus;
   provider: ComputeProvider;
   providerResourceId?: string;
+  connectionPending?: boolean;
   connection?: Record<string, unknown>;
   message?: string;
   meta?: Record<string, unknown>;
