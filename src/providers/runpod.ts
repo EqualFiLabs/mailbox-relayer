@@ -29,6 +29,8 @@ export interface RunPodAdapterOptions {
   infraBaseUrl?: string;
   fetchFn?: FetchLike;
   sleepFn?: (ms: number) => Promise<void>;
+  podPollIntervalMs?: number;
+  podPollMaxAttempts?: number;
 }
 
 export class RunPodComputeAdapter implements ComputeProviderAdapter {
@@ -38,6 +40,8 @@ export class RunPodComputeAdapter implements ComputeProviderAdapter {
   private readonly infraBaseUrl: string;
   private readonly fetchFn: FetchLike;
   private readonly sleepFn: (ms: number) => Promise<void>;
+  private readonly podPollIntervalMs: number;
+  private readonly podPollMaxAttempts: number;
 
   constructor(options: RunPodAdapterOptions = {}) {
     this.apiKey = options.apiKey ?? process.env.RUNPOD_API_KEY;
@@ -52,6 +56,8 @@ export class RunPodComputeAdapter implements ComputeProviderAdapter {
     );
     this.fetchFn = options.fetchFn ?? fetch;
     this.sleepFn = options.sleepFn ?? ((ms: number) => new Promise((resolve) => setTimeout(resolve, ms)));
+    this.podPollIntervalMs = options.podPollIntervalMs ?? 2000;
+    this.podPollMaxAttempts = options.podPollMaxAttempts ?? 10;
   }
 
   async provision(request: ProvisionRequest): Promise<ProvisionResult> {
@@ -164,11 +170,110 @@ export class RunPodComputeAdapter implements ComputeProviderAdapter {
   }
 
   private async provisionDedicatedPod(request: ProvisionRequest): Promise<ProvisionResult> {
+    const policy = this.toRecord(request.policy);
+    const gpuTypeIds = this.readStringArray(policy, ['gpuTypeIds', 'gpuIds']);
+    const gpuCount = this.readInt(policy, ['gpuCount']) ?? 1;
+    const volumeInGb = this.readInt(policy, ['volumeInGb']);
+    const imageName = this.readString(policy, ['imageName', 'image']) ?? 'runpod/pytorch:latest';
+
+    const createBody: Record<string, unknown> = {
+      name: `equalfi-${request.agreementId}`,
+      ...(gpuTypeIds.length > 0 ? { gpuTypeIds } : {}),
+      gpuCount,
+      imageName,
+      ...(volumeInGb !== undefined ? { volumeInGb } : {}),
+    };
+
+    const created = await this.requestInfra<Record<string, unknown>>('POST', '/pods', {
+      body: createBody,
+    });
+
+    if (!created.ok) {
+      return {
+        status: 'error',
+        provider: this.provider,
+        message: created.error,
+        meta: {
+          agreementId: request.agreementId,
+          traceId: request.traceId,
+          statusCode: created.statusCode,
+          requestId: created.requestId,
+          errorBody: created.errorBody,
+        },
+      };
+    }
+
+    const podId = this.readString(created.data, ['pod_id', 'podId', 'id']);
+    if (!podId) {
+      return {
+        status: 'error',
+        provider: this.provider,
+        message: 'RunPod pod creation response missing pod id',
+        meta: {
+          agreementId: request.agreementId,
+          traceId: request.traceId,
+          requestId: created.requestId,
+          response: created.data,
+        },
+      };
+    }
+
+    let lastPodState: Record<string, unknown> | undefined;
+    let lastRequestId: string | undefined;
+
+    for (let attempt = 0; attempt < this.podPollMaxAttempts; attempt += 1) {
+      const pod = await this.requestInfra<Record<string, unknown>>('GET', `/pods/${encodeURIComponent(podId)}`);
+      if (!pod.ok) {
+        return {
+          status: 'error',
+          provider: this.provider,
+          message: pod.error,
+          meta: {
+            agreementId: request.agreementId,
+            traceId: request.traceId,
+            providerResourceId: podId,
+            statusCode: pod.statusCode,
+            requestId: pod.requestId,
+            errorBody: pod.errorBody,
+          },
+        };
+      }
+
+      lastPodState = pod.data;
+      lastRequestId = pod.requestId;
+
+      if (this.isPodRunning(pod.data)) {
+        return {
+          status: 'ok',
+          provider: this.provider,
+          providerResourceId: podId,
+          connection: this.buildPodConnection(pod.data),
+          meta: {
+            agreementId: request.agreementId,
+            traceId: request.traceId,
+            requestId: pod.requestId ?? created.requestId,
+            pollAttempts: attempt + 1,
+          },
+        };
+      }
+
+      if (attempt < this.podPollMaxAttempts - 1) {
+        await this.sleepFn(this.podPollIntervalMs);
+      }
+    }
+
     return {
-      status: 'not_implemented',
+      status: 'ok',
       provider: this.provider,
-      message: 'RunPod dedicated mode provisioning is not implemented yet (task 7.1).',
-      meta: { agreementId: request.agreementId, traceId: request.traceId, computeMode: 'dedicated' },
+      providerResourceId: podId,
+      connectionPending: true,
+      connection: this.buildPodConnection(lastPodState),
+      meta: {
+        agreementId: request.agreementId,
+        traceId: request.traceId,
+        requestId: lastRequestId ?? created.requestId,
+        pollAttempts: this.podPollMaxAttempts,
+      },
     };
   }
 
@@ -330,5 +435,48 @@ export class RunPodComputeAdapter implements ComputeProviderAdapter {
       }
     }
     return [];
+  }
+
+  private readRecord(value: Record<string, unknown> | undefined, keys: string[]): Record<string, unknown> | undefined {
+    if (!value) return undefined;
+    for (const key of keys) {
+      const candidate = this.toRecord(value[key]);
+      if (candidate) return candidate;
+    }
+    return undefined;
+  }
+
+  private readPortMapPort(value: Record<string, unknown> | undefined, keys: string[], port: string): number | undefined {
+    const map = this.readRecord(value, keys);
+    if (!map) return undefined;
+    const candidate = map[port];
+    if (typeof candidate === 'number' && Number.isFinite(candidate)) return candidate;
+    if (typeof candidate === 'string' && candidate.trim().length > 0) {
+      const parsed = Number(candidate);
+      if (!Number.isNaN(parsed) && Number.isFinite(parsed)) return parsed;
+    }
+    return undefined;
+  }
+
+  private isPodRunning(pod: Record<string, unknown>): boolean {
+    const desired = this.readString(pod, ['desiredStatus']);
+    const runtime = this.readString(pod, ['status']);
+    const normalized = (desired ?? runtime ?? '').toLowerCase();
+    return normalized === 'running' || normalized === 'active';
+  }
+
+  private buildPodConnection(pod: Record<string, unknown> | undefined): Record<string, unknown> {
+    if (!pod) return {};
+
+    const podUrl = this.readString(pod, ['pod_url', 'podUrl', 'url']);
+    const sshHost = this.readString(pod, ['ssh_host', 'sshHost', 'publicIp', 'public_ip']);
+    const sshPort =
+      this.readInt(pod, ['sshPort', 'ssh_port']) ?? this.readPortMapPort(pod, ['portMappings', 'ports'], '22');
+
+    return {
+      ...(podUrl ? { pod_url: podUrl } : {}),
+      ...(sshHost ? { ssh_host: sshHost } : {}),
+      ...(sshPort !== undefined ? { ssh_port: sshPort } : {}),
+    };
   }
 }
