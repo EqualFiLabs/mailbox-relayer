@@ -15,8 +15,7 @@ export class NonceManager {
   }
 
   async init(): Promise<void> {
-    const nonce = await this.provider.getTransactionCount(this.walletAddress, 'pending');
-    this.localNonce = nonce;
+    this.localNonce = await this.fetchChainNonce();
   }
 
   async acquireNonce(): Promise<number> {
@@ -33,8 +32,7 @@ export class NonceManager {
 
   async resync(): Promise<void> {
     await this.mutex.runExclusive(async () => {
-      const nonce = await this.provider.getTransactionCount(this.walletAddress, 'pending');
-      this.localNonce = nonce;
+      this.localNonce = await this.fetchChainNonce();
     });
   }
 
@@ -51,5 +49,11 @@ export class NonceManager {
 
   get normalizedWalletAddress(): string {
     return getAddress(this.walletAddress);
+  }
+
+  private async fetchChainNonce(): Promise<number> {
+    const pending = await this.provider.getTransactionCount(this.walletAddress, 'pending');
+    const latest = await this.provider.getTransactionCount(this.walletAddress, 'latest');
+    return Math.max(pending, latest);
   }
 }

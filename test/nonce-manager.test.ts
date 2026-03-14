@@ -25,7 +25,10 @@ describe('NonceManager', () => {
     await manager.init();
 
     expect(manager.currentNonce()).toBe(7);
-    expect(calls).toEqual([{ address: walletAddress, blockTag: 'pending' }]);
+    expect(calls).toEqual([
+      { address: walletAddress, blockTag: 'pending' },
+      { address: walletAddress, blockTag: 'latest' },
+    ]);
   });
 
   it('sequential acquireNonce() calls return monotonically increasing nonces', async () => {
@@ -56,6 +59,33 @@ describe('NonceManager', () => {
     await manager.resync();
 
     expect(manager.currentNonce()).toBe(20);
+  });
+
+  it('init() and resync() prefer latest nonce when pending lags', async () => {
+    const calls: Array<{ address: string; blockTag: string }> = [];
+    let pending = 0;
+    let latest = 3;
+    const provider = {
+      async getTransactionCount(address: string, blockTag: string) {
+        calls.push({ address, blockTag });
+        return blockTag === 'pending' ? pending : latest;
+      },
+    } as unknown as JsonRpcProvider;
+
+    const manager = new NonceManager(provider, walletAddress);
+    await manager.init();
+    expect(manager.currentNonce()).toBe(3);
+
+    pending = 1;
+    latest = 9;
+    await manager.resync();
+    expect(manager.currentNonce()).toBe(9);
+    expect(calls).toEqual([
+      { address: walletAddress, blockTag: 'pending' },
+      { address: walletAddress, blockTag: 'latest' },
+      { address: walletAddress, blockTag: 'pending' },
+      { address: walletAddress, blockTag: 'latest' },
+    ]);
   });
 
   it('concurrent acquireNonce() calls are serialized with no duplicates', async () => {
