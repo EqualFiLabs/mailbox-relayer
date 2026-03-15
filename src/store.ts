@@ -36,6 +36,7 @@ export interface ProviderEventRecord {
 
 export type AgreementState =
   | 'active'
+  | 'delinquent'
   | 'activation_failed'
   | 'mailbox_received'
   | 'breach_detected'
