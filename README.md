@@ -6,12 +6,13 @@ Offchain mailbox relayer service for EqualFi.
 
 - `GET /health` - basic liveness check
 - `GET /health/ready` - scheduler readiness check (returns `ready: true` when all enabled schedulers are running)
-- `GET /providers` - list scaffolded compute adapters
+- `GET /providers` - list registered compute adapters
 - `POST /messages` - enqueue a **canonical encrypted mailbox envelope**
 - `GET /messages/:id` - fetch message details
 - `POST /deliveries/:id/ack` - acknowledge delivery
 - `POST /demo/vertical-flow` - run mocked end-to-end flow (encrypt → queue → adapter execute → callback + ack)
 - `POST /events/onchain` - ingest on-chain lifecycle events (single event or batch)
+- `POST /events/provider` - ingest provider callback events (Phase 2 route; requires `PROVIDER_EVENT_AUTH_TOKEN`)
 - `GET /agreements/:agreementId/state` - inspect relayer agreement state machine view
 - `POST /metering/run` - execute deterministic metering poll once (all agreements or one)
 - `GET /metering/submissions` - inspect prepared batched registerUsage submissions + latest settlement status
@@ -49,16 +50,17 @@ Notes:
 
 ## Compute provider adapter interface (step 3)
 
-Scaffolded provider adapter contracts live in `src/providers/`:
+Provider adapter modules live in `src/providers/`:
 
 - `types.ts` → `ComputeProviderAdapter` interface + request/result contracts
-- `lambda.ts` → `LambdaComputeAdapter` stub
-- `runpod.ts` → `RunPodComputeAdapter` stub
-- `venice.ts` → `VeniceComputeAdapter` stub
+- `lambda.ts` → `LambdaComputeAdapter` implementation
+- `runpod.ts` → `RunPodComputeAdapter` implementation (serverless + dedicated)
+- `venice.ts` → `VeniceComputeAdapter` implementation
+- `bankr.ts` → `BankrComputeAdapter` implementation
 - `registry.ts` → no-lock-in adapter registry + default registration
 
 Current status:
-- `venice` adapter has a live HTTP implementation scaffold (key create, paginated usage read, revoke flow)
+- `venice` adapter has a live HTTP implementation (key create, paginated usage read, revoke flow)
 - `bankr` adapter is implemented (provisioning, usage normalization, soft-kill terminate path)
 - `lambda` adapter is implemented (provisioning, usage metering, termination)
 - `runpod` adapter is implemented (serverless + dedicated provisioning, usage metering, termination)
@@ -66,6 +68,16 @@ Current status:
 
 Environment variables:
 
+Core runtime:
+- `PORT` (optional, default `3000`)
+- `HOST` (optional, default `0.0.0.0`)
+- `RELAYER_DB_PATH` (optional; when set, enables durable SQLite state store)
+- `ADMIN_AUTH_TOKEN` (optional; when set, protects admin POST routes via Bearer token)
+  - `/events/onchain` is strict: it always requires Bearer auth and returns `503` if `ADMIN_AUTH_TOKEN` is unset
+- `ALERT_WEBHOOK_URL` (optional; when set, enables webhook alerts for failures)
+- `ALERT_WEBHOOK_TOKEN` (optional; bearer token for alert webhook)
+
+Provider adapters:
 - `VENICE_API_KEY` (required for live Venice operations)
 - `VENICE_BASE_URL` (optional, default `https://api.venice.ai/api/v1`)
 - `LAMBDA_API_KEY` (required for live Lambda operations)
@@ -81,19 +93,50 @@ Environment variables:
 - `BANKR_KEY_POOL_PATH` (optional filesystem path to key-pool JSON)
 - `BANKR_KEY_POOL_ENV_PREFIX` (optional env prefix for key-pool discovery, default `BANKR_KEY_POOL_KEY_`)
 - `BANKR_KEY_POOL_STRICT` (optional, default `true`; enforce one key fingerprint per active agreement)
-- `RELAYER_DB_PATH` (optional; when set, enables durable SQLite state store)
+
+Schedulers:
 - `METERING_ENABLED` (`true`/`false`, default `false`)
 - `METERING_INTERVAL_MS` (default `30000`)
 - `KILLSWITCH_RETRY_ENABLED` (`true`/`false`, default `false`)
 - `KILLSWITCH_RETRY_INTERVAL_MS` (default `30000`)
 - `USAGE_SETTLEMENT_ENABLED` (`true`/`false`, default `false`)
 - `USAGE_SETTLEMENT_INTERVAL_MS` (default `30000`)
+
+Fallback usage settlement sender:
 - `USAGE_SETTLEMENT_WEBHOOK_URL` (optional; external signer/settlement worker endpoint)
 - `USAGE_SETTLEMENT_WEBHOOK_TOKEN` (optional; bearer token for settlement webhook)
-- `ADMIN_AUTH_TOKEN` (optional; when set, protects POST endpoints like `/metering/run`, `/killswitch/retries/run`, `/settlement/run` via Bearer token)
-  - `/events/onchain` is strict: it always requires Bearer auth and returns `503` if `ADMIN_AUTH_TOKEN` is unset
-- `ALERT_WEBHOOK_URL` (optional; when set, enables webhook alerts for failures)
-- `ALERT_WEBHOOK_TOKEN` (optional; bearer token for alert webhook)
+
+Phase 2 (on-chain listener + tx submitter) bootstrap:
+- `RPC_URL` (required with the group below)
+- `DIAMOND_ADDRESS` (required with the group below)
+- `CHAIN_ID` (required with the group below)
+- `RELAYER_PRIVATE_KEY` (required with the group below)
+  - Important: either set all four vars above or none. Partial config exits on startup with `phase2_partial_env_config`.
+- `EVENT_LISTENER_START_BLOCK` (optional, default `0`)
+- `CONFIRMATION_DEPTH` (optional, default `12`)
+- `EVENT_POLL_INTERVAL_MS` (optional, default `2000`)
+- `TX_TIMEOUT_MS` (optional, default `60000`)
+- `GAS_LIMIT_MULTIPLIER` (optional, default `1.2`)
+- `MAX_GAS_PRICE_GWEI` (optional, default `100`)
+- `LOW_BALANCE_THRESHOLD_ETH` (optional, default `0.01`)
+- `RELAYER_ENCRYPTION_PRIVATE_KEY` (optional; if set, must differ from `RELAYER_PRIVATE_KEY`)
+- `PROVIDER_EVENT_AUTH_TOKEN` (optional; enables authenticated provider ingress at `POST /events/provider`)
+
+Identity gate (only when `IDENTITY_MODE=erc8004_offchain`):
+- `IDENTITY_MODE` (`none` or `erc8004_offchain`, default `none`)
+- `ERC8004_RPC_URL` (required in `erc8004_offchain` mode)
+- `ERC8004_CHAIN_ID` (required in `erc8004_offchain` mode)
+- `ERC8004_REGISTRY_ADDRESS` (required in `erc8004_offchain` mode)
+- `IDENTITY_PROOF_MAX_SKEW_SECONDS` (optional, default `60`)
+
+Additional optional schedulers:
+- `COVENANT_MONITOR_ENABLED` (`true`/`false`, default `false`)
+- `COVENANT_MONITOR_INTERVAL_MS` (default `900000`)
+- `COVENANT_FACET_ADDRESS` (optional, fallback `DIAMOND_ADDRESS`)
+- `INTEREST_ACCRUAL_ENABLED` (`true`/`false`, default `false`)
+- `INTEREST_ACCRUAL_INTERVAL_MS` (default `3600000`)
+- `INTEREST_ACCRUAL_THRESHOLD_SECONDS` (default `3600`)
+- `INTEREST_FACET_ADDRESS` (optional, fallback `DIAMOND_ADDRESS`)
 
 ### Bankr v1.5 soft-kill behavior
 
@@ -128,6 +171,7 @@ When `ALERT_WEBHOOK_URL` is configured, the relayer sends POST requests for oper
 |------------|----------|--------------|
 | `metering_failure` | `error` | Provider usage poll fails |
 | `termination_failure` | `warning` | Provider termination attempt fails (retry scheduled) |
+| `termination_followup_required` | `warning` | Provider termination succeeds with required manual hard-revoke follow-up |
 | `termination_exhausted` | `critical` | Termination retries exhausted without success |
 | `settlement_failure` | `warning` | Usage settlement attempt fails (retry scheduled) |
 | `settlement_exhausted` | `critical` | Settlement retries exhausted without success |
@@ -196,10 +240,38 @@ Supported `eventType` values:
 - `mailbox`
 - `breach`
 - `default`
+- `risk_covenant_breached`
+- `risk_draw_terminated`
+- `risk_defaulted`
+- `agreement_closed`
 
 Idempotency:
 - dedupe key is `chainId:blockNumber:logIndex`
 - processed keys persist when `RELAYER_DB_PATH` is set
+
+## Provider callback ingress (Phase 2)
+
+`POST /events/provider` accepts:
+
+```json
+{
+  "provider": "runpod",
+  "providerResourceId": "endpoint-or-pod-id",
+  "externalEventId": "evt-123",
+  "payload": { "status": "completed" },
+  "observedAt": "2026-03-10T21:15:00.000Z",
+  "traceId": "trace-xyz"
+}
+```
+
+Auth + availability:
+- Route is registered in Phase 2 mode.
+- Requires header `Authorization: Bearer <PROVIDER_EVENT_AUTH_TOKEN>`.
+- If token is not configured, route responds `503` with `provider_event_ingress_disabled`.
+
+Provider event idempotency:
+- dedupe key is `(provider, providerResourceId, externalEventId)`
+- accepted responses return `202` and include `{ "ok": true, "deduped": false|true }`
 
 ## Deterministic metering loop (Phase 2)
 
