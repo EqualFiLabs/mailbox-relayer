@@ -13,6 +13,7 @@ import { AlertingService, DisabledAlertSender, WebhookAlertSender } from './aler
 import { bootstrapPhase2 } from './bootstrap-phase2';
 import { InterestAccrualScheduler, InterestAccrualService } from './interest-accrual';
 import { CovenantMonitorScheduler, CovenantMonitorService } from './covenant-monitor';
+import { DelinquencyMonitor } from './schedulers/DelinquencyMonitor';
 import { JsonRpcProvider, Wallet } from 'ethers';
 
 function phase2ConfigMode(): 'disabled' | 'partial' | 'enabled' {
@@ -133,11 +134,41 @@ async function main(): Promise<void> {
     );
   }
 
+  const delinquencyMonitorEnabled = process.env.DELINQUENCY_MONITOR_ENABLED === 'true';
+  const delinquencyMonitorIntervalMs = Number(process.env.DELINQUENCY_MONITOR_INTERVAL_MS ?? '900000');
+  const riskFacetAddress = process.env.RISK_FACET_ADDRESS ?? process.env.DIAMOND_ADDRESS;
+  const agreementFacetAddress = process.env.AGREEMENT_FACET_ADDRESS ?? process.env.DIAMOND_ADDRESS;
+  let delinquencyMonitor: DelinquencyMonitor | undefined;
+  if (
+    delinquencyMonitorEnabled &&
+    process.env.RPC_URL &&
+    process.env.RELAYER_PRIVATE_KEY &&
+    riskFacetAddress &&
+    agreementFacetAddress
+  ) {
+    const provider = new JsonRpcProvider(process.env.RPC_URL);
+    const signer = new Wallet(process.env.RELAYER_PRIVATE_KEY, provider);
+    delinquencyMonitor = new DelinquencyMonitor(
+      provider,
+      signer,
+      riskFacetAddress,
+      agreementFacetAddress,
+      delinquencyMonitorIntervalMs
+    );
+    delinquencyMonitor.start();
+  } else if (delinquencyMonitorEnabled) {
+    // eslint-disable-next-line no-console
+    console.warn(
+      '[delinquency-monitor] scheduler enabled but missing one of RPC_URL, RELAYER_PRIVATE_KEY, RISK_FACET_ADDRESS/DIAMOND_ADDRESS, or AGREEMENT_FACET_ADDRESS/DIAMOND_ADDRESS'
+    );
+  }
+
   const buildOptions = {
     ...(phase2?.eventListener ? { eventListener: phase2.eventListener } : {}),
     ...(phase2?.txSubmitter ? { txSubmitter: phase2.txSubmitter } : {}),
     ...(phase2?.providerEventIngress ? { providerEventIngress: phase2.providerEventIngress } : {}),
     ...(phase2?.activationContextResolver ? { activationContextResolver: phase2.activationContextResolver } : {}),
+    ...(delinquencyMonitor ? { delinquencyMonitor } : {}),
   };
 
   const app = buildApp(
@@ -158,6 +189,7 @@ async function main(): Promise<void> {
     usageSettlementScheduler.stop();
     covenantMonitorScheduler?.stop();
     interestAccrualScheduler?.stop();
+    delinquencyMonitor?.stop();
   });
 
   const port = Number(process.env.PORT ?? '3000');

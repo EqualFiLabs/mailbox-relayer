@@ -23,6 +23,7 @@ import {
   UsageSettlementScheduler,
   UsageSettlementService,
 } from './settlement';
+import { DelinquencyMonitor } from './schedulers/DelinquencyMonitor';
 
 interface BuildAppOptions {
   adminAuthToken?: string;
@@ -31,6 +32,7 @@ interface BuildAppOptions {
   txSubmitter?: TransactionSubmitter;
   providerEventIngress?: ProviderEventIngress;
   activationContextResolver?: ActivationContextResolver;
+  delinquencyMonitor?: DelinquencyMonitor;
 }
 
 function envNumber(value: string | undefined): number | undefined {
@@ -131,6 +133,7 @@ export function buildApp(
     const metering = meteringScheduler?.status() ?? { enabled: false, intervalMs: 0 };
     const killSwitchRetry = killSwitchRetryScheduler?.status() ?? { enabled: false, intervalMs: 0 };
     const usageSettlement = usageSettlementScheduler?.status() ?? { enabled: false, intervalMs: 0 };
+    const delinquencyMonitor = options.delinquencyMonitor?.status() ?? { enabled: false, intervalMs: 0 };
     const eventListener = options.eventListener?.status() ?? {
       isPolling: false,
       lastConfirmedBlock: 0,
@@ -151,6 +154,7 @@ export function buildApp(
       (!metering.enabled || metering.running === true) &&
       (!killSwitchRetry.enabled || killSwitchRetry.running === true) &&
       (!usageSettlement.enabled || usageSettlement.running === true) &&
+      (!delinquencyMonitor.enabled || delinquencyMonitor.running === true) &&
       (!options.eventListener || eventListener.isPolling === true) &&
       (!options.txSubmitter || txSubmitter.isEnabled === true);
 
@@ -160,6 +164,7 @@ export function buildApp(
         metering,
         killSwitchRetry,
         usageSettlement,
+        delinquencyMonitor,
       },
       integrations: {
         eventListener,
@@ -338,6 +343,7 @@ export function buildApp(
     scheduler: meteringScheduler?.status() ?? { enabled: false, intervalMs: 0 },
     killSwitchRetryScheduler: killSwitchRetryScheduler?.status() ?? { enabled: false, intervalMs: 0 },
     usageSettlementScheduler: usageSettlementScheduler?.status() ?? { enabled: false, intervalMs: 0 },
+    delinquencyMonitor: options.delinquencyMonitor?.status() ?? { enabled: false, intervalMs: 0 },
   }));
 
   app.post('/messages', async (request, reply) => {
